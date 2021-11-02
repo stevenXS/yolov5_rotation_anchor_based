@@ -69,10 +69,12 @@ def process_batch(detections, labels, iouv):
     boxes1 = torch.cat([detections[:, :4], detections[:, 6].view((-1, 1))], 1)
     boxes2 = torch.cat([labels[:, 1:5], labels[:, 5].view((-1, 1))], 1)
     iou = rotate_box_iou(boxes2.cpu().numpy(), boxes1.cpu().numpy())
+    # iou = rotate_box_iou(boxes2, boxes1.cpu())
     # print(iou.shape,iou)
     # exit(1)
     # iou = box_iou(labels[:, 1:5], detections[:, :4])
     iou = torch.from_numpy(iou).to(detections.device)
+
     x = torch.where((iou >= iouv[0]) & (labels[:, 0:1] == detections[:, 5]))  # IoU above threshold and classes match
     if x[0].shape[0]:
         matches = torch.cat((torch.stack(x, 1), iou[x[0], x[1]][:, None]), 1).cpu().numpy()  # [label, detection, iou]

@@ -563,7 +563,8 @@ def clip_coords(boxes, shape):
 
 def non_max_suppression(prediction, conf_thres=0.25, iou_thres=0.45, classes=None, agnostic=False, multi_label=False,
                         labels=(), max_det=300):
-    """Runs Non-Maximum Suppression (NMS) on inference results
+    """
+        Runs Non-Maximum Suppression (NMS) on inference results
 
     Returns:
          list of detections, on (n,6) tensor per image [xyxy, conf, cls]
@@ -981,6 +982,62 @@ def vis_bbox(imgs, targets):
         y = xywh2xyxy(tar1)
         show_bbox(img, y)
 
+# 可视化匹配关系
+def vis_match(imgs, targets, tcls, tboxs, indices, anchors, pred, ttars):
+    tar = targets.cpu().detach().numpy()
+    data = imgs * 255
+    data = data.permute(0, 2, 3, 1).cpu().detach().numpy()
+    h, w = data.shape[1], data.shape[2]
+    gain = np.ones(6)
+    gain[2:6] = np.array([w, h, w, h])
+    tar = (tar * gain)
+
+    strdie = [8, 16, 32]
+    # 对每张图片进行可视化
+    for j in range(imgs.shape[0]):
+        img = data[j].astype(np.uint8)[..., ::-1]
+        tar1 = tar[tar[:, 0] == j][:, 2:]
+        y1 = xywh2xyxy(tar1)
+        # img = VisualHelper.show_bbox(img1.copy(), y1, color=(255, 255, 255), is_show=False, thickness=2)
+        # 对每个预测尺度进行单独可视化
+        vis_imgs = []
+        for i in range(3):  # i=0检测小物体，i=1检测中等尺度物体，i=2检测大物体
+            s = strdie[i]
+            # anchor尺度
+            gain1 = np.array(pred[i].shape)[[3, 2, 3, 2]]
+            b, a, gx, gy = indices[i]
+            b1 = b.cpu().detach().numpy()
+            gx1 = gx.cpu().detach().numpy()
+            gy1 = gy.cpu().detach().numpy()
+            anchor = anchors[i].cpu().detach().numpy()
+            ttar = ttars[i].cpu().detach().numpy()
+
+            # 找出对应图片对应分支的信息
+            indx = b1 == j
+            gx1 = gx1[indx]
+            gy1 = gy1[indx]
+            anchor = anchor[indx]
+            ttar = ttar[indx]
+
+            # 还原到原图尺度进行可视化
+            ttar /= gain1
+            ttar *= np.array([w, h, w, h], np.float32)
+            y = xywh2xyxy(ttar)
+            # label 可视化
+            img1 = show_bbox(img.copy(), y, color=(0, 0, 255), is_show=False)
+
+            # anchor 需要考虑偏移，在任何一层，每个bbox最多3*3=9个anchor进行匹配
+            anchor *= s
+            anchor_bbox = np.stack([gy1, gx1], axis=1)
+            k = np.array(pred[i].shape, np.float)[[3, 2]]
+            anchor_bbox = anchor_bbox / k
+            anchor_bbox *= np.array([w, h], np.float32)
+            anchor_bbox = np.concatenate([anchor_bbox, anchor], axis=1)
+            anchor_bbox1 = xywh2xyxy(anchor_bbox)
+            # 正样本anchor可视化
+            img1 = show_bbox(img1, anchor_bbox1, color=(0, 255, 255), is_show=False)
+            vis_imgs.append(img1)
+        show_img(vis_imgs, is_merge=True)
 #################################################################################
 #################################################################################
 

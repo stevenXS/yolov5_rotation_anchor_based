@@ -67,7 +67,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
     w.mkdir(parents=True, exist_ok=True)  # make dir
     last, best = w / 'last.pt', w / 'best.pt'
 
-    # Hyperparameters
+    # 加载超参数
     if isinstance(hyp, str):
         with open(hyp) as f:
             hyp = yaml.safe_load(f)  # load hyps dict
@@ -80,7 +80,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
         yaml.safe_dump(vars(opt), f, sort_keys=False)
     data_dict = None
 
-    # Loggers
+    # 配置日志
     if RANK in [-1, 0]:
         loggers = Loggers(save_dir, weights, opt, hyp, LOGGER)  # loggers instance
         if loggers.wandb:
@@ -265,7 +265,8 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                 f"Logging results to {colorstr('bold', save_dir)}\n"
                 f'Starting training for {epochs} epochs...')
 
-    for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
+    # epoch ------------------------------------------------------------------
+    for epoch in range(start_epoch, epochs):
         model.train()
 
         # Update image weights (optional, single-GPU only)
@@ -446,14 +447,14 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
 def parse_opt(known=False):
     parser = argparse.ArgumentParser()
     # python -m torch.distributed.launch --nproc_per_node 2 train.py --sync-bn --device 0,1
-    parser.add_argument('--weights', type=str, default='/home/dio/VSST/xsq/my_graduation_project_2022/remote_sensing_detection/yolov5_rotation-master/runs/train/exp_models/yolov5m2.yaml/weights/best.pt', help='initial weights path')
+    parser.add_argument('--weights', type=str, default='weights/best.pt', help='initial weights path')
     parser.add_argument('--cfg', type=str, default='models/yolov5m.yaml', help='model.yaml path')
     parser.add_argument('--data', type=str, default='data/DOTA_ROTATED.yaml', help='dataset.yaml path')
     parser.add_argument('--hyp', type=str, default='data/hyps/hyp.finetune.yaml', help='hyperparameters path')
     parser.add_argument('--epochs', type=int, default=20)
-    parser.add_argument('--batch-size', type=int, default=8, help='total batch size for all GPUs')
-    parser.add_argument('--imgsz', '--img', '--img-size', type=int, default=1024, help='train, val image size (pixels)')
-    parser.add_argument('--device', default='1', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
+    parser.add_argument('--batch-size', type=int, default=2, help='total batch size for all GPUs')
+    parser.add_argument('--imgsz', '--img', '--img-size', type=int, default=640, help='train, val image size (pixels)')
+    parser.add_argument('--device', default='2', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     parser.add_argument('--rect', action='store_true', help='rectangular training')
     parser.add_argument('--resume', nargs='?', const=True, default=False, help='resume most recent training')
     parser.add_argument('--nosave', action='store_true', help='only save final checkpoint')

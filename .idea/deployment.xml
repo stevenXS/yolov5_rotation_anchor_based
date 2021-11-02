@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="PublishConfigData" serverName="dio-yolov5-anchor-free" remoteFilesAllowedToDisappearOnAutoupload="false">
+    <serverData>
+      <paths name="bobo-1">
+        <serverdata>
+          <mappings>
+            <mapping local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="dio-rotate">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/my_graduation_project_2022/remote_sensing_detection/yolov5_rotation-master" local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="dio-test">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/my_graduation_project_2022/remote_sensing_detection/yolov5_rotation-master" local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="dio-yolov4-anchor-free">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/home/dio/VSST/xsq/my_graduation_project_2022/remote_sensing_detection/yolov5_rotation-master" local="$PROJECT_DIR$" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="dio-yolov5-anchor-free">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/my_graduation_project_2022/remote_sensing_detection/yolov5_rotation_anchor_free" local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+    </serverData>
+  </component>
+</project>

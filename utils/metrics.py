@@ -277,7 +277,13 @@ def box_iou(box1, box2):
 
 
 # 中心点 矩形的w h, 旋转的theta（角度，不是弧度）
+# 疑问：训练时计算loss使用的bbox_iou，里面添加了CIou loss，评估时，使用的是rotate_box_iou这里并没有添加CIou loss
 def rotate_box_iou(boxes1, boxes2):
+    '''
+     args:
+        box1:[N,5],(x,y,w,h,theta)
+        box2:[M,5]
+    '''
     area1 = boxes1[:, 2] * boxes1[:, 3]
     area2 = boxes2[:, 2] * boxes2[:, 3]
     ious = []
@@ -286,13 +292,11 @@ def rotate_box_iou(boxes1, boxes2):
         r1 = ((box1[0], box1[1]), (box1[2], box1[3]), box1[4])
         for j, box2 in enumerate(boxes2):
             r2 = ((box2[0], box2[1]), (box2[2], box2[3]), box2[4])
-
             int_pts = cv2.rotatedRectangleIntersection(r1, r2)[1]
             if int_pts is not None:
                 order_pts = cv2.convexHull(int_pts, returnPoints=True)
-
                 int_area = cv2.contourArea(order_pts)
-
+                # 得到交并比
                 inter = int_area * 1.0 / (area1[i] + area2[j] - int_area)
                 temp_ious.append(inter)
             else:

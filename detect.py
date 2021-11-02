@@ -249,7 +249,7 @@ def run(weights='yolov5s.pt',  # model.pt path(s)
 
 def parse_opt():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--weights', nargs='+', type=str, default='/home/dio/VSST/xsq/my_graduation_project_2022/remote_sensing_detection/yolov5_rotation-master/runs/train/exp_models/yolov5m_asff_sub_tr2/weights/best.pt', help='model.pt path(s)')
+    parser.add_argument('--weights', nargs='+', type=str, default='yolov5_rotation-master/runs/train/exp_models/yolov5m_asff_sub_tr2/weights/best.pt', help='model.pt path(s)')
     parser.add_argument('--source', type=str, default='/home/dio/VSST/xsq/my_graduation_project_2022/remote_sensing_detection/DOTA_devkit_YOLO-master/DOTA_demo/images/P0003.png', help='file/dir/URL/glob, 0 for webcam')
     parser.add_argument('--imgsz', '--img', '--img-size', nargs='+', type=int, default=[1024], help='inference size h,w')
     parser.add_argument('--conf-thres', type=float, default=0.25, help='confidence threshold')
