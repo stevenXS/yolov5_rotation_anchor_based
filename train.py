@@ -38,7 +38,7 @@ from utils.general import labels_to_class_weights, increment_path, labels_to_ima
     strip_optimizer, get_latest_run, check_dataset, check_git_status, check_img_size, check_requirements, \
     check_file, check_yaml, check_suffix, print_mutation, set_logging, one_cycle, colorstr, methods
 from utils.downloads import attempt_download
-from utils.loss import ComputeLoss
+from utils.loss import ComputeLoss,ComputeLoss_AnchorFree
 from utils.plots import plot_labels, plot_evolve
 from utils.torch_utils import EarlyStopping, ModelEMA, de_parallel, intersect_dicts, select_device, \
     torch_distributed_zero_first
@@ -209,6 +209,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                                               hyp=hyp, augment=True, cache=opt.cache, rect=opt.rect, rank=RANK,
                                               workers=workers, image_weights=opt.image_weights, quad=opt.quad,
                                               prefix=colorstr('train: '))
+
     mlc = int(np.concatenate(dataset.labels, 0)[:, 0].max())  # max label class
     nb = len(train_loader)  # number of batches
     assert mlc < nc, f'Label class {mlc} exceeds nc={nc} in {data}. Possible class labels are 0-{nc - 1}'
@@ -259,7 +260,8 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
     scheduler.last_epoch = start_epoch - 1  # do not move
     scaler = amp.GradScaler(enabled=cuda)
     stopper = EarlyStopping(patience=opt.patience)
-    compute_loss = ComputeLoss(model)  # init loss class
+    # compute_loss = ComputeLoss(model)  # init loss class
+    compute_loss = ComputeLoss_AnchorFree(model)  # init loss class
     LOGGER.info(f'Image sizes {imgsz} train, {imgsz} val\n'
                 f'Using {train_loader.num_workers} dataloader workers\n'
                 f"Logging results to {colorstr('bold', save_dir)}\n"
@@ -282,14 +284,18 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
         mloss = torch.zeros(4, device=device)  # mean losses
         if RANK != -1:
             train_loader.sampler.set_epoch(epoch)
+
         if epochs - epoch <=  opt.end_mosaic:
             train_loader.dataset.mosaic = False
             # train_loader.dataset.augment = False
         pbar = enumerate(train_loader)
+
         LOGGER.info(('\n' + '%10s' * 8) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'angle', 'labels', 'img_size'))
+
         if RANK in [-1, 0]:
             pbar = tqdm(pbar, total=nb)  # progress bar
         optimizer.zero_grad()
+
         for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
             ni = i + nb * epoch  # number integrated batches (since train start)
             imgs = imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
@@ -320,13 +326,15 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                 if RANK != -1:
                     loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
                 if opt.quad:
+                    print("opt.quad: ",opt.quad)
                     loss *= 4.
 
             # Backward
             scaler.scale(loss).backward()
 
             # Optimize
-            if ni - last_opt_step >= accumulate:
+            # if ni - last_opt_step >= accumulate:
+            if ni % accumulate == 0: # 模型反向传播accumulate次之后再根据累积的梯度更新一次参数
                 scaler.step(optimizer)  # optimizer.step
                 scaler.update()
                 optimizer.zero_grad()
@@ -352,11 +360,11 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
             callbacks.run('on_train_epoch_end', epoch=epoch)
             ema.update_attr(model, include=['yaml', 'nc', 'hyp', 'names', 'stride', 'class_weights'])
             final_epoch = (epoch + 1 == epochs) or stopper.possible_stop
-            if not noval and epoch % opt.divisor==0 or final_epoch:  # Calculate mAP
+            if not noval and (epoch+1) % opt.divisor==0 or final_epoch:  # Calculate mAP
                 results, maps, _ = val.run(data_dict,
                                            batch_size=batch_size // WORLD_SIZE * 2,
                                            imgsz=1024,
-                                           iou_thres=0.5,
+                                           iou_thres=0.01,
                                            model=ema.ema,
                                            single_cls=single_cls,
                                            dataloader=val_loader,
@@ -377,7 +385,8 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
             callbacks.run('on_fit_epoch_end', log_vals, epoch, best_fitness, fi)
 
             # Save model
-            if epoch % opt.divisor==0 or (not nosave) or (final_epoch and not evolve) :  # if save
+            # if epoch % opt.divisor==0 or (not nosave) or (final_epoch and not evolve) :  # if save
+            if (not nosave) or (final_epoch and not evolve) :  # if save
                 ckpt = {'epoch': epoch,
                         'best_fitness': best_fitness,
                         'model': deepcopy(de_parallel(model)).half(),
@@ -390,7 +399,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                 epoch_path = w / 'epoch_{}.pt'.format(epoch) # 修改
 
                 # Save last, best and delete
-                if epoch % opt.divisor == 0:  # 修改
+                if (epoch+1) % (opt.divisor*2) == 0:  # 修改
                     torch.save(ckpt, epoch_path) # 修改
 
                 elif final_epoch:
@@ -447,19 +456,19 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
 def parse_opt(known=False):
     parser = argparse.ArgumentParser()
     # python -m torch.distributed.launch --nproc_per_node 2 train.py --sync-bn --device 0,1
-    parser.add_argument('--weights', type=str, default='weights/best.pt', help='initial weights path')
-    parser.add_argument('--cfg', type=str, default='models/yolov5m.yaml', help='model.yaml path')
+    parser.add_argument('--weights', type=str, default='weights/yolov5m.pt', help='initial weights path')
+    parser.add_argument('--cfg', type=str, default='models/yolov5m-anchor-free.yaml', help='model.yaml path')
     parser.add_argument('--data', type=str, default='data/DOTA_ROTATED.yaml', help='dataset.yaml path')
     parser.add_argument('--hyp', type=str, default='data/hyps/hyp.finetune.yaml', help='hyperparameters path')
     parser.add_argument('--epochs', type=int, default=20)
-    parser.add_argument('--batch-size', type=int, default=2, help='total batch size for all GPUs')
-    parser.add_argument('--imgsz', '--img', '--img-size', type=int, default=640, help='train, val image size (pixels)')
-    parser.add_argument('--device', default='2', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
+    parser.add_argument('--batch-size', type=int, default=1, help='total batch size for all GPUs')
+    parser.add_argument('--imgsz', '--img', '--img-size', type=int, default=608, help='train, val image size (pixels)')
+    parser.add_argument('--device', default='3', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     parser.add_argument('--rect', action='store_true', help='rectangular training')
     parser.add_argument('--resume', nargs='?', const=True, default=False, help='resume most recent training')
     parser.add_argument('--nosave', action='store_true', help='only save final checkpoint')
     parser.add_argument('--noval', action='store_true', help='only validate final epoch')
-    parser.add_argument('--noautoanchor', action='store_true', help='disable autoanchor check')
+    parser.add_argument('--noautoanchor', action='store_true', default=True,help='disable autoanchor check')
     parser.add_argument('--evolve', type=int, nargs='?',help='evolve hyperparameters for x generations')
     parser.add_argument('--bucket', type=str, default='', help='gsutil bucket')
     parser.add_argument('--cache', type=str, nargs='?', const='ram', help='--cache images in "ram" (default) or "disk"')
@@ -468,7 +477,7 @@ def parse_opt(known=False):
     parser.add_argument('--single-cls', action='store_true', help='train multi-class data as single-class')
     parser.add_argument('--adam', action='store_true', help='use torch.optim.Adam() optimizer')
     parser.add_argument('--sync-bn', action='store_true', help='use SyncBatchNorm, only available in DDP mode')
-    parser.add_argument('--workers', type=int, default=8, help='maximum number of dataloader workers')
+    parser.add_argument('--workers', type=int, default=4, help='maximum number of dataloader workers')
     parser.add_argument('--project', default='runs/train', help='save to project/name')
     parser.add_argument('--entity', default=None, help='W&B entity')
     parser.add_argument('--name', default='exp', help='save to project/name')
@@ -485,7 +494,7 @@ def parse_opt(known=False):
     parser.add_argument('--patience', type=int, default=100, help='Early Stopping patience (epochs without improvement)')
     parser.add_argument('--begin_val', type=int, default=10, help='When will validation begin, default No.30 epoch')
     parser.add_argument('--end_mosaic', type=int, default=0, help='When disable mosaic, default last 0 epochs')
-    parser.add_argument('--divisor', type=int, default=2, help='when epochs % divisor==0, begin val')
+    parser.add_argument('--divisor', type=int, default=10, help='when epochs % divisor==0, begin val')
     opt = parser.parse_known_args()[0] if known else parser.parse_args()
     return opt
 

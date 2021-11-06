@@ -209,6 +209,7 @@ def run(data,
         # Statistics per image
         # pred: [x,y,x,y,conf,classid,angle]
         for si, pred in enumerate(out):
+            # label size = (class_id, x,y,w,h,angle)
             labels = targets[targets[:, 0] == si, 1:]
             nl = len(labels)
             tcls = labels[:, 0].tolist() if nl else []  # target class
@@ -326,15 +327,15 @@ def run(data,
 
 def parse_opt():
     parser = argparse.ArgumentParser(prog='val.py')
-    parser.add_argument('--data', type=str, default='/home/dio/VSST/xsq/my_graduation_project_2022/remote_sensing_detection/yolov5_rotation-master/data/DOTA_ROTATED.yaml', help='dataset.yaml path')
-    parser.add_argument('--weights', nargs='+', type=str, default='/home/dio/VSST/xsq/my_graduation_project_2022/remote_sensing_detection/yolov5_rotation-master/runs/train/exp_models/yolov5m_asff_sub_tr2/weights/epoch_20.pt', help='model.pt path(s)')
-    parser.add_argument('--batch-size', type=int, default=24, help='batch size')
-    parser.add_argument('--imgsz', '--img', '--img-size', type=int, default=1024, help='inference size (pixels)')
+    parser.add_argument('--data', type=str, default='data/DOTA_ROTATED.yaml', help='dataset.yaml path')
+    parser.add_argument('--weights', nargs='+', type=str, default='runs/train/exp_models/yolov5m/weights/best.pt', help='model.pt path(s)')
+    parser.add_argument('--batch-size', type=int, default=32, help='batch size')
+    parser.add_argument('--imgsz', '--img', '--img-size', type=int, default=800, help='inference size (pixels)')
     parser.add_argument('--hyp', type=str, default='data/hyps/hyp.scratch.yaml', help='hyperparameters path')
-    parser.add_argument('--conf-thres', type=float, default=0.25, help='confidence threshold')
+    parser.add_argument('--conf-thres', type=float, default=0.1, help='confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.5, help='NMS IoU threshold')
     parser.add_argument('--task', default='val', help='train, val, test, speed or study')
-    parser.add_argument('--device', default='1', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
+    parser.add_argument('--device', default='3', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     parser.add_argument('--single-cls', action='store_true', help='treat as single-class dataset')
     parser.add_argument('--augment', action='store_true', help='augmented inference')
     parser.add_argument('--verbose', action='store_true', help='report mAP by class')

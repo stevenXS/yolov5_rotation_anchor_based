@@ -19,7 +19,7 @@ FILE = Path(__file__).absolute()
 sys.path.append(FILE.parents[0].as_posix())  # add yolov5/ to path
 
 from models.common import Conv
-from models.yolo import Detect
+from models.yolo import Detect,Detect_AnchorFree_Decoupled
 from models.experimental import attempt_load
 from utils.activations import Hardswish, SiLU
 from utils.general import colorstr, check_img_size, check_requirements, file_size, set_logging
@@ -145,6 +145,9 @@ def run(weights='./yolov5s.pt',  # weights path
             m.inplace = inplace
             m.onnx_dynamic = dynamic
             # m.forward = m.forward_export  # assign forward (optional)
+        elif isinstance(m,Detect_AnchorFree_Decoupled): # add
+            m.inplace = inplace
+            m.onnx_dynamic = dynamic
 
     for _ in range(2):
         y = model(img)  # dry runs

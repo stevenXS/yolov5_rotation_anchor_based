@@ -86,7 +86,7 @@ class Ensemble(nn.ModuleList):
 
 
 def attempt_load(weights, map_location=None, inplace=True, fuse=True):
-    from models.yolo import Detect, Model, ASFF_Detect
+    from models.yolo import Detect, Model, ASFF_Detect, Detect_AnchorFree_Decoupled # add
 
     # Loads an ensemble of models weights=[a,b,c] or a single model weights=[a] or weights=a
     model = Ensemble()
@@ -99,7 +99,7 @@ def attempt_load(weights, map_location=None, inplace=True, fuse=True):
 
     # Compatibility updates
     for m in model.modules():
-        if type(m) in [nn.Hardswish, nn.LeakyReLU, nn.ReLU, nn.ReLU6, nn.SiLU, Detect, Model, ASFF_Detect]:
+        if type(m) in [nn.Hardswish, nn.LeakyReLU, nn.ReLU, nn.ReLU6, nn.SiLU, Detect, Model, ASFF_Detect, Detect_AnchorFree_Decoupled]: # add
             m.inplace = inplace  # pytorch 1.7.0 compatibility
         elif type(m) is Conv:
             m._non_persistent_buffers_set = set()  # pytorch 1.6.0 compatibility

@@ -51,7 +51,7 @@ from tensorflow.python.framework.convert_to_constants import convert_variables_t
 
 from models.common import Conv, Bottleneck, SPP, DWConv, Focus, BottleneckCSP, Concat, autopad, C3
 from models.experimental import MixConv2d, CrossConv, attempt_load
-from models.yolo import Detect
+from models.yolo import Detect,Detect_AnchorFree_Decoupled
 from utils.datasets import LoadImages
 from utils.general import check_dataset, check_yaml, make_divisible
 
@@ -307,6 +307,10 @@ def parse_model(d, ch, model):  # model_dict, input_channels(3)
         elif m is Concat:
             c2 = sum([ch[-1 if x == -1 else x + 1] for x in f])
         elif m is Detect:
+            args.append([ch[x + 1] for x in f])
+            if isinstance(args[1], int):  # number of anchors
+                args[1] = [list(range(args[1] * 2))] * len(f)
+        elif m is Detect_AnchorFree_Decoupled: # add 2021年11月3日11:01:05
             args.append([ch[x + 1] for x in f])
             if isinstance(args[1], int):  # number of anchors
                 args[1] = [list(range(args[1] * 2))] * len(f)

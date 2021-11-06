@@ -38,12 +38,12 @@ class Detect(nn.Module):
     stride = None  # strides computed during build
     onnx_dynamic = False  # ONNX export parameter
 
-    def __init__(self, nc=80, anchors=(), ch=(), inplace=True):  # detection layer
+    def __init__(self, nc=16, anchors=(), ch=(), inplace=True):  # detection layer
         super().__init__()
         self.nc = nc  # number of classes
         self.no = nc + 5 + 180  # number of outputs per anchor, 180 mean angle classifications.
         self.nl = len(anchors)  # number of detection layers
-        self.na = len(anchors[0]) // 2  # number of anchors
+        self.na = len(anchors[0]) // 2  # number of anchors，3
         self.grid = [torch.zeros(1)] * self.nl  # init grid
         a = torch.tensor(anchors).float().view(self.nl, -1, 2)
         self.register_buffer('anchors', a)  # shape(nl,na,2)
@@ -53,6 +53,7 @@ class Detect(nn.Module):
 
     def forward(self, x):
         z = []  # inference output
+
         for i in range(self.nl):
             x[i] = self.m[i](x[i])  # conv
             bs, _, ny, nx = x[i].shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
@@ -62,6 +63,7 @@ class Detect(nn.Module):
                 if self.grid[i].shape[2:4] != x[i].shape[2:4] or self.onnx_dynamic:
                     self.grid[i] = self._make_grid(nx, ny).to(x[i].device)
 
+                # y: torch.Size([1, 1, 4, 4, 265])
                 y = x[i].sigmoid()
                 if self.inplace:
                     y[..., 0:2] = (y[..., 0:2] * 2. - 0.5 + self.grid[i]) * self.stride[i]  # xy
@@ -127,22 +129,27 @@ class Detect_AnchorFree_Decoupled(nn.Module):
         ch: 通道数=3
         anchors: anchor数量（anchor free都是1）
     '''
-    def __init__(self, nc=16, anchors=1, ch=(3,)):  # detection layer
+    def __init__(self, nc=16, anchors=(), ch=(), inplace=True):  # detection layer
         super().__init__()
         '''
             1.anchor based-> anchor free：（nc + 5 + angle) -> (num_classes + x,y,left,top,right,bottom,score)
             2.有了anchor free后就不需要每种anchor设置3种scale；
         '''
-        self.anchors = 1
         self.nc = nc  # number of classes
         # self.no = nc + 7 # 每一个anchor需要预测的维度数（num_classes + x,y,left,top, right,bottom + score）
-        self.no = nc + 5 # 每一个anchor需要预测的维度数（num_classes + x,y,w,h,score）
-        self.nl = 3  # number of detection layers  3  三种步长的检测网络
-        self.na = 1 # 只有一种anchor
+        self.no = nc + 5 + 1 # 每一个anchor需要预测的维度数（num_classes + x,y,w,h,score + theta）
+        # self.nl = 3  # number of detection layers  3
+        self.nl = len(anchors)  # 三种步长的检测网络
+        self.na = len(anchors[0]) // 2  # 每一个anchor的种类，anchor free只有1种anchor
+
+        # 缓存对应的anchor
+        a = torch.tensor(anchors).float().view(self.nl, -1, 2)
+        self.register_buffer('anchors', a)  # shape(nl,na,2)
+        self.register_buffer('anchor_grid', a.clone().view(self.nl * self.na, 1, -1, 1, 1, 2))  # shape(nl,1,na,1,1,2)
+
         self.grid = [torch.zeros(1)] * self.nl  # init grid   [tensor([0.]), tensor([0.]), tensor([0.])] 初始化网格
-        '''
-            对【self.m = nn.ModuleList(nn.Conv2d(x, self.no * self.na, 1) for x in ch)】”分类“和”回归“任务进行解耦
-        '''
+
+        # 对【self.m = nn.ModuleList(nn.Conv2d(x, self.no * self.na, 1) for x in ch)】”分类“和”回归“任务进行解耦
         self.cls_conv = nn.ModuleList() # 分类卷积
         self.reg_conv = nn.ModuleList() # 回归卷积
 
@@ -154,6 +161,7 @@ class Detect_AnchorFree_Decoupled(nn.Module):
         self.stems = nn.ModuleList() # 进行通道压缩的卷积
 
         # 3种不同尺度的输出进行初始化卷积
+        # 同时生成grid，为build_target_anchor_free处理正样本anchor做准备
         for i in range(len(ch)):
             # 构建1*1卷积进行通道降维
             self.stems.append(BaseConv(in_channels=(int(ch[i])), out_channels=int(ch[i]),ksize=1,stride=1,act=self.act))
@@ -169,10 +177,12 @@ class Detect_AnchorFree_Decoupled(nn.Module):
             ]))
 
             # 构建预测的卷积
-            self.cls_pred.append(nn.Conv2d(in_channels=int(ch[i]), out_channels=self.anchors * self.nc, kernel_size=1,stride=1))
+            self.cls_pred.append(nn.Conv2d(in_channels=int(ch[i]), out_channels=self.na * self.nc, kernel_size=1,stride=1))
             self.reg_pred.append(nn.Conv2d(in_channels=int(ch[i]), out_channels=4, kernel_size=1,stride=1))
-            self.obj_pred.append(nn.Conv2d(in_channels=int(ch[i]), out_channels=self.anchors * 1, kernel_size=1,stride=1))
+            self.obj_pred.append(nn.Conv2d(in_channels=int(ch[i]), out_channels=self.na * 1, kernel_size=1,stride=1))
             self.angle_preds.append(nn.Conv2d(in_channels=int(ch[i]), out_channels=1, kernel_size=1,stride=1))
+
+
 
     def forward(self, x):
         '''
@@ -223,22 +233,26 @@ class Detect_AnchorFree_Decoupled(nn.Module):
 
             bs, _, ny, nx = x[i].shape  # x[i]:(batch_size, (5+nc) * na, size1', size2')
 
-            x[i] = x[i].view(bs, self.na, _, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
+            x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
 
-            # inference推理模式
-            if not self.training:
-                # 以height为y轴，width为x轴的grid坐标 坐标按顺序（0, 0） （1, 0）... (width-1, 0) (0, 1) (1,1) ... (width-1, 1) ... (width-1 , height-1)
-                if self.grid[i].shape[2:4] != x[i].shape[2:4]:
-                    self.grid[i] = self._make_grid(nx, ny).to(x[i].device)
-
-                y = x[i].sigmoid() # 归一化处理
-
-                # xy 预测的真实坐标 y[..., 0:2] * 2. - 0.5是相对于左上角网格的偏移量； self.grid[i]是网格坐标索引
-                y[..., 0:2] = (y[..., 0:2] * 2. - 0.5 + self.grid[i].to(x[i].device)) * self.stride[i]
-
-                # wh 预测的真实wh  self.anchor_grid[i]是原始anchors宽高  (y[..., 2:4] * 2) ** 2 是预测出的anchors的wh倍率
-                y[..., 2:4] = (y[..., 2:4] * 2) ** 2 * self.anchor_grid[i]
-                z.append(y.view(bs, -1, self.no))
+            # 构建grid
+            if self.grid[i].shape[2:4] != x[i].shape[2:4]:
+                grid = self._make_grid(nx, ny).to(x[i].device)
+                self.grid[i] = grid.view(1,-1,2) # size=(1,h_size*w_size,2)
+            # inference推理模式,相当于解码操作
+            # if not self.training:
+            #     # 以height为y轴，width为x轴的grid坐标 坐标按顺序（0, 0） （1, 0）... (width-1, 0) (0, 1) (1,1) ... (width-1, 1) ... (width-1 , height-1)
+            #     if self.grid[i].shape[2:4] != x[i].shape[2:4]:
+            #         self.grid[i] = self._make_grid(nx, ny).to(x[i].device)
+            #
+            #     y = x[i].sigmoid() # 归一化处理
+            #
+            #     # xy 预测的真实坐标 y[..., 0:2] * 2. - 0.5是相对于左上角网格的偏移量； self.grid[i]是网格坐标索引
+            #     y[..., 0:2] = (y[..., 0:2] * 2. - 0.5 + self.grid[i].to(x[i].device)) * self.stride[i]
+            #
+            #     # wh 预测的真实wh  self.anchor_grid[i]是原始anchors宽高  (y[..., 2:4] * 2) ** 2 是预测出的anchors的wh倍率
+            #     y[..., 2:4] = (y[..., 2:4] * 2) ** 2 * self.anchor_grid[i]
+            #     z.append(y.view(bs, -1, self.no))
 
         return x if self.training else (torch.cat(z, 1), x)
 
@@ -385,10 +399,10 @@ class Model(nn.Module):
             import yaml  # for torch hub
             self.yaml_file = Path(cfg).name
             # env for windows,2021年10月27日10:00:19
-            # with open(cfg,encoding='UTF-8') as f:
-            #     self.yaml = yaml.safe_load(f)  # model dict
-            with open(cfg) as f:
+            with open(cfg,encoding='UTF-8') as f:
                 self.yaml = yaml.safe_load(f)  # model dict
+            # with open(cfg) as f:
+            #     self.yaml = yaml.safe_load(f)  # model dict
 
         # Define model
         ch = self.yaml['ch'] = self.yaml.get('ch', ch)  # input channels
@@ -398,6 +412,7 @@ class Model(nn.Module):
         if anchors:
             LOGGER.info(f'Overriding model.yaml anchors with anchors={anchors}')
             self.yaml['anchors'] = round(anchors)  # override yaml value
+
         self.model, self.save = parse_model(deepcopy(self.yaml), ch=[ch])  # model, savelist
         self.names = [str(i) for i in range(self.yaml['nc'])]  # default names
         self.inplace = self.yaml.get('inplace', True)
@@ -405,6 +420,7 @@ class Model(nn.Module):
 
         # Build strides, anchors---"检测头“
         m = self.model[-1]  # Detect()
+
         if isinstance(m, Detect):
             s = 256  # 2x min stride
             m.inplace = self.inplace
@@ -426,10 +442,10 @@ class Model(nn.Module):
             print('Strides: %s' % m.stride.tolist())
 
         # 构建anchor free的检测头
-        elif isinstance(m, Detect_AnchorFree):
-            s = 256
+        elif isinstance(m, Detect_AnchorFree_Decoupled):
+            s = 128
             m.stride = torch.tensor([s / x.shape[-2] for x in self.forward(torch.zeros(1, ch, s, s))])  # forward
-            m.anchors /= m.stride.view(-1, 1, 1)
+            # m.anchors /= m.stride.view(-1, 1, 1)
             # check_anchor_order(m)
             self.stride = m.stride
             self._initialize_biases()
@@ -437,7 +453,7 @@ class Model(nn.Module):
 
         # Init weights, biases
         initialize_weights(self)
-        self.info()
+        self.info() # 这里计算了模型的复杂度
         LOGGER.info('')
 
     def forward(self, x, augment=False, profile=False, visualize=False):
@@ -551,7 +567,7 @@ class Model(nn.Module):
                 mj.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
             # add,初始化角度的偏置变量
             for mk in m.angle_preds:
-                b = mk.bias.view(self.n_anchors, -1)
+                b = mk.bias.view(1, -1)
                 b.data.fill_(-math.log((1 - 1e-2) / 1e-2))
                 mk.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
 
@@ -645,6 +661,7 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
             args.append([ch[x] for x in f])
             if isinstance(args[1], int):  # number of anchors
                 args[1] = [list(range(args[1] * 2))] * len(f)
+
         elif m is Contract:
             c2 = ch[f] * args[0] ** 2
         elif m is Expand:
@@ -674,8 +691,8 @@ if __name__ == '__main__':
         yolov5m-asff: 10948910
     """
     parser = argparse.ArgumentParser()
-    parser.add_argument('--cfg', type=str, default='yolov5m-anchor-free.yaml', help='model.yaml')
-    parser.add_argument('--device', default='1', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
+    parser.add_argument('--cfg', type=str, default='yolov5m.yaml', help='model.yaml')
+    parser.add_argument('--device', default='0', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     parser.add_argument('--profile', action='store_true', help='profile model speed')
     opt = parser.parse_args()
     opt.cfg = check_yaml(opt.cfg)  # check YAML
@@ -685,12 +702,14 @@ if __name__ == '__main__':
 
     # Create model
     model = Model(opt.cfg).to(device)
-    model.train()
-    x = torch.rand(1,3,224,224).cuda()
-    res = model(x)
-
-    for x in res:
-        print(x.shape)
+    # # model.train()
+    x = torch.rand(1,3,224,224).to(device)
+    # res = model(x)
+    #
+    # for x in res:
+    #     print(x.shape)
+    flops, params = profile(model, inputs=(x,))
+    print("GFLOPs :{:.2f}, Params : {:.2f}".format(flops / 1e9, params / 1e6))
     # exit(1)
     # Profile
     # if opt.profile:

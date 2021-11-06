@@ -532,7 +532,6 @@ def resample_segments(segments, n=1000):
         segments[i] = np.concatenate([np.interp(x, xp, s[:, i]) for i in range(2)]).reshape(2, -1).T  # segment xy
     return segments
 
-
 def scale_coords(img1_shape, coords, img0_shape, ratio_pad=None):
     # Rescale coords (xyxy) from img1_shape to img0_shape
     if ratio_pad is None:  # calculate from img0_shape
@@ -570,7 +569,8 @@ def non_max_suppression(prediction, conf_thres=0.25, iou_thres=0.45, classes=Non
          list of detections, on (n,6) tensor per image [xyxy, conf, cls]
     """
 
-    nc = prediction.shape[2] - 5 - 180  # number of classes
+    nc = prediction.shape[2] - 5 - 180  # number of classes for anchor based
+    # nc = prediction.shape[2] - 5 - 1  # number of classes for anchor free
     xc = prediction[..., 4] > conf_thres  # candidates
 
     # Checks

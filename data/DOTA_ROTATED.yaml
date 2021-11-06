@@ -3,13 +3,13 @@
 # val: ../DOTA_YOLO/val_1024_OBB/images/train2020/
 
 #train: /home/dio/VSST/xsq/Dataset/DOTA-v1.5/train2021/images
-#train: E:\Datasets\dota-v1.5\train2021\images
+#train: E:\Datasets\rotate_val\images # windows
 train: /home/dio/VSST/xsq/Dataset/DOTA-v1.5/rotate_val/images  #测试图
 #train: /home/dio/VSST/xsq/my_graduation_project_2022/remote_sensing_detection/YOLOv5_DOTA_OBB-master/DOTA_demo_view/images
 #train: /home/dio/VSST/xsq/Dataset/DOTA-v1.5/train/images
 val: /home/dio/VSST/xsq/Dataset/DOTA-v1.5/rotate_val/images #测试图
 #val: /home/dio/VSST/xsq/Dataset/DOTA-v1.5/val2021/images
-#val: E:\Datasets\dota-v1.5\val2021\images
+#val: E:\Datasets\rotate_val\images # windows
 
 
 # number of classes
