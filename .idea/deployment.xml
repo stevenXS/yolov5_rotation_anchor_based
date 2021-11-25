@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
-  <component name="PublishConfigData" serverName="dio-yolov5-anchor-free" remoteFilesAllowedToDisappearOnAutoupload="false">
+  <component name="PublishConfigData" serverName="fofo-v5-anchor-free" remoteFilesAllowedToDisappearOnAutoupload="false">
     <serverData>
       <paths name="bobo-1">
         <serverdata>
@@ -9,14 +9,28 @@
           </mappings>
         </serverdata>
       </paths>
-      <paths name="dio-rotate">
+      <paths name="bobo-anchor-free-yolov5">
         <serverdata>
           <mappings>
-            <mapping deploy="/my_graduation_project_2022/remote_sensing_detection/yolov5_rotation-master" local="$PROJECT_DIR$" web="/" />
+            <mapping local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>
-      <paths name="dio-test">
+      <paths name="bobo-fcos">
+        <serverdata>
+          <mappings>
+            <mapping local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="dio-bbvector-anchor-free">
+        <serverdata>
+          <mappings>
+            <mapping local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="dio-rotate">
         <serverdata>
           <mappings>
             <mapping deploy="/my_graduation_project_2022/remote_sensing_detection/yolov5_rotation-master" local="$PROJECT_DIR$" web="/" />
@@ -34,6 +48,34 @@
         <serverdata>
           <mappings>
             <mapping deploy="/my_graduation_project_2022/remote_sensing_detection/yolov5_rotation_anchor_free" local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="dio-yolov5-dota-obb">
+        <serverdata>
+          <mappings>
+            <mapping local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="fofo-bbvector-debug">
+        <serverdata>
+          <mappings>
+            <mapping local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="fofo-v5-anchor-free">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/yolov5_rotation_anchore_free_decoupled_centernet" local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="jojo-yolov5-anchor-free">
+        <serverdata>
+          <mappings>
+            <mapping local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>

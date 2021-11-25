@@ -24,7 +24,7 @@ sys.path.append(FILE.parents[0].as_posix())  # add yolov5/ to path
 from models.experimental import attempt_load
 from utils.datasets import create_dataloader
 from utils.general import coco80_to_coco91_class, check_dataset, check_img_size, check_requirements, \
-    check_suffix, check_yaml, box_iou, non_max_suppression, scale_coords, xyxy2xywh, xywh2xyxy, set_logging, \
+    check_suffix, check_yaml, box_iou, non_max_suppression, non_max_suppression_anchor_free, scale_coords, xyxy2xywh, xywh2xyxy, set_logging, \
     increment_path, colorstr
 from utils.metrics import ap_per_class, ConfusionMatrix, rotate_box_iou
 from utils.plots import plot_images, output_to_target, plot_study_txt
@@ -69,12 +69,41 @@ def process_batch(detections, labels, iouv):
     boxes1 = torch.cat([detections[:, :4], detections[:, 6].view((-1, 1))], 1)
     boxes2 = torch.cat([labels[:, 1:5], labels[:, 5].view((-1, 1))], 1)
     iou = rotate_box_iou(boxes2.cpu().numpy(), boxes1.cpu().numpy())
-    # iou = rotate_box_iou(boxes2, boxes1.cpu())
     # print(iou.shape,iou)
     # exit(1)
     # iou = box_iou(labels[:, 1:5], detections[:, :4])
     iou = torch.from_numpy(iou).to(detections.device)
-
+    x = torch.where((iou >= iouv[0]) & (labels[:, 0:1] == detections[:, 5]))  # IoU above threshold and classes match
+    if x[0].shape[0]:
+        matches = torch.cat((torch.stack(x, 1), iou[x[0], x[1]][:, None]), 1).cpu().numpy()  # [label, detection, iou]
+        if x[0].shape[0] > 1:
+            matches = matches[matches[:, 2].argsort()[::-1]]
+            matches = matches[np.unique(matches[:, 1], return_index=True)[1]]
+            # matches = matches[matches[:, 2].argsort()[::-1]]
+            matches = matches[np.unique(matches[:, 0], return_index=True)[1]]
+        matches = torch.Tensor(matches).to(iouv.device)
+        correct[matches[:, 1].long()] = matches[:, 2:3] >= iouv
+    return correct
+# add
+def process_batch_anchor_free(detections, labels, iouv):
+    """
+    Return correct predictions matrix. Both sets of boxes are in (x1, y1, x2, y2) format.
+    Arguments:
+        detections (Array[N, 7]), x1, y1, x2, y2, conf, class, angle
+        labels (Array[M, 6]), class, x, y, w, h, angle
+    Returns:
+        correct (Array[N, 10]), for 10 IoU levels
+    """
+    correct = torch.zeros(detections.shape[0], iouv.shape[0], dtype=torch.bool, device=iouv.device)
+    detections[:, :4] = xyxy2xywh(detections[:, :4])
+    # labels[:, 1:5] = xyxy2xywh(labels[:, 1:5])
+    boxes1 = torch.cat([detections[:, :4], detections[:, 6].view((-1, 1))], 1)
+    boxes2 = torch.cat([labels[:, 1:5], labels[:, 5].view((-1, 1))], 1)
+    iou = rotate_box_iou(boxes2.cpu().numpy(), boxes1.cpu().numpy())
+    # print(iou.shape,iou)
+    # exit(1)
+    # iou = box_iou(labels[:, 1:5], detections[:, :4])
+    iou = torch.from_numpy(iou).to(detections.device)
     x = torch.where((iou >= iouv[0]) & (labels[:, 0:1] == detections[:, 5]))  # IoU above threshold and classes match
     if x[0].shape[0]:
         matches = torch.cat((torch.stack(x, 1), iou[x[0], x[1]][:, None]), 1).cpu().numpy()  # [label, detection, iou]
@@ -87,13 +116,12 @@ def process_batch(detections, labels, iouv):
         correct[matches[:, 1].long()] = matches[:, 2:3] >= iouv
     return correct
 
-
 @torch.no_grad()
 def run(data,
         weights=None,  # model.pt path(s)
         batch_size=32,  # batch size
-        imgsz=1024,  # inference size (pixels)
-        hyp = None,
+        imgsz=640,  # inference size (pixels)
+        anchor_free = False,
         conf_thres=0.25,  # confidence threshold
         iou_thres=0.6,  # NMS IoU threshold
         task='val',  # train, val, test, speed or study
@@ -174,7 +202,13 @@ def run(data,
     class_map = coco80_to_coco91_class() if is_coco else list(range(1000))
     s = ('%20s' + '%11s' * 6) % ('Class', 'Images', 'Labels', 'P', 'R', 'mAP@.5', 'mAP@.5:.95')
     p, r, f1, mp, mr, map50, map, t0, t1, t2 = 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.
-    loss = torch.zeros(4, device=device)
+
+    # add
+    if anchor_free:
+        loss = torch.zeros(3, device=device) # anchor free模式则减少了一个损失的返回，（lbox, lobj, lcls)
+    else:
+        loss = torch.zeros(4, device=device) # （lbox, lobj, lcls, langle)
+
     jdict, stats, ap, ap_class = [], [], [], []
 
     for batch_i, (img, targets, paths, shapes) in enumerate(tqdm(dataloader, desc=s)):
@@ -200,16 +234,19 @@ def run(data,
 
         lb = [targets[targets[:, 0] == i, 1:] for i in range(nb)] if save_hybrid else []  # for autolabelling
         t = time_sync()
-        # [3.05495e+02, 3.81194e+02, 3.30351e+02, 4.04484e+02, 8.13928e-01, 1.10000e+01, 9.00000e+01]
-        # [x,y,x,y,conf,class,angle]
-        out = non_max_suppression(out, conf_thres, iou_thres, labels=lb, multi_label=False, agnostic=single_cls)
+
+        if anchor_free:
+            # TODO: out.shape=[
+            out = non_max_suppression_anchor_free(out, conf_thres, iou_thres, labels=lb, multi_label=False, agnostic=single_cls)
+        else:
+            # [x,y,x,y,conf,class,angle], [3.05495e+02, 3.81194e+02, 3.30351e+02, 4.04484e+02, 8.13928e-01, 1.10000e+01, 9.00000e+01]
+            out = non_max_suppression(out, conf_thres, iou_thres, labels=lb, multi_label=False, agnostic=single_cls)
         # print(type(out),np.array(out).shape)
         t2 += time_sync() - t
 
-        # Statistics per image
-        # pred: [x,y,x,y,conf,classid,angle]
+        # Statistics per image -----------------------------------------------
+        # pred: [x,y,x,y,conf,classid,angle],修改后：[x,y,w,h,theta,obj,classes]
         for si, pred in enumerate(out):
-            # label size = (class_id, x,y,w,h,angle)
             labels = targets[targets[:, 0] == si, 1:]
             nl = len(labels)
             tcls = labels[:, 0].tolist() if nl else []  # target class
@@ -223,7 +260,11 @@ def run(data,
 
             # Predictions
             if single_cls:
-                pred[:, 5] = 0
+                if anchor_free:
+                    pred[:, 6] = 0 # add
+                else:
+                    pred[:, 5] = 0
+
             predn = pred.clone()
             scale_coords(img[si].shape[1:], predn[:, :4], shape, shapes[si][1])  # native-space pred
 
@@ -235,13 +276,20 @@ def run(data,
 
                 scale_coords(img[si].shape[1:], tbox, shape, shapes[si][1])  # native-space labels
                 labelsn = torch.cat((labels[:, 0:1], xyxy2xywh(tbox), labels[:, 5:6]), 1)  # native-space labels
-                correct = process_batch(predn, labelsn, iouv)
+                if anchor_free:
+                    correct = process_batch_anchor_free(predn, labelsn, iouv)
+                else:
+                    correct = process_batch(predn, labelsn, iouv)
 
                 if plots:
                     confusion_matrix.process_batch(predn, labelsn)
             else:
                 correct = torch.zeros(pred.shape[0], niou, dtype=torch.bool)
-            stats.append((correct.cpu(), pred[:, 4].cpu(), pred[:, 5].cpu(), tcls))  # (correct, conf, pcls, tcls)
+
+            if anchor_free: # add
+                stats.append((correct.cpu(), pred[:, 5].cpu(), pred[:, 6].cpu(), tcls))  # (correct, conf, pcls, tcls)
+            else:
+                stats.append((correct.cpu(), pred[:, 4].cpu(), pred[:, 5].cpu(), tcls))  # (correct, conf, pcls, tcls)
 
             # Save/log
             if save_txt:
@@ -328,14 +376,14 @@ def run(data,
 def parse_opt():
     parser = argparse.ArgumentParser(prog='val.py')
     parser.add_argument('--data', type=str, default='data/DOTA_ROTATED.yaml', help='dataset.yaml path')
-    parser.add_argument('--weights', nargs='+', type=str, default='runs/train/exp_models/yolov5m/weights/best.pt', help='model.pt path(s)')
-    parser.add_argument('--batch-size', type=int, default=32, help='batch size')
+    parser.add_argument('--weights', nargs='+', type=str, default='/home/fofo/A/xsq/yolo_pretrained_weights/yolov5m_asff_subpixle_tr.pt', help='model.pt path(s)')
+    parser.add_argument('--batch-size', type=int, default=4, help='batch size')
     parser.add_argument('--imgsz', '--img', '--img-size', type=int, default=800, help='inference size (pixels)')
-    parser.add_argument('--hyp', type=str, default='data/hyps/hyp.scratch.yaml', help='hyperparameters path')
+    # parser.add_argument('--hyp', type=str, default='data/hyps/hyp.scratch.yaml', help='hyperparameters path')
     parser.add_argument('--conf-thres', type=float, default=0.1, help='confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.5, help='NMS IoU threshold')
     parser.add_argument('--task', default='val', help='train, val, test, speed or study')
-    parser.add_argument('--device', default='3', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
+    parser.add_argument('--device', default='2', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     parser.add_argument('--single-cls', action='store_true', help='treat as single-class dataset')
     parser.add_argument('--augment', action='store_true', help='augmented inference')
     parser.add_argument('--verbose', action='store_true', help='report mAP by class')

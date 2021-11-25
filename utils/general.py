@@ -506,6 +506,39 @@ def xyn2xy(x, w=640, h=640, padw=0, padh=0):
     y[:, 1] = h * x[:, 1] + padh  # top left y
     return y
 
+# add,TODO:长边转短边
+def longsideformat2cvminAreaRect(x_c, y_c, longside, shortside, theta_longside):
+    '''
+    trans longside format(x_c, y_c, longside, shortside, θ) to minAreaRect(x_c, y_c, width, height, θ)
+    两者区别为:
+            当opencv表示法中width为最长边时（包括正方形的情况），则两种表示方法一致
+            当opencv表示法中width不为最长边 ，则最长边表示法的角度要在opencv的Θ基础上-90度
+    @param x_c: center_x
+    @param y_c: center_y
+    @param longside: 最长边
+    @param shortside: 最短边
+    @param theta_longside: 最长边和x轴逆时针旋转的夹角，逆时针方向角度为负 [-180, 0)
+    @return: ((x_c, y_c),(width, height),Θ)
+            x_c: center_x
+            y_c: center_y
+            width: x轴逆时针旋转碰到的第一条边最长边
+            height: 与width不同的边
+            theta: x轴逆时针旋转与width的夹角，由于原点位于图像的左上角，逆时针旋转角度为负 [-90, 0)
+    '''
+    if ((theta_longside >= -180) and (theta_longside < -90)):  # width is not the longest side
+        width = shortside
+        height = longside
+        theta = theta_longside + 90
+    else:
+        width = longside
+        height =shortside
+        theta = theta_longside
+
+    if (theta < -90) or (theta >= 0):
+        print('当前θ=%.1f，超出opencv的θ定义范围[-90, 0)' % theta)
+    # 这里需要转化为整数，add
+    return ((x_c, y_c), (width, height), np.float(theta))
+    # return ((x_c.to(torch.int64), y_c.to(torch.int64)), (width.to(torch.int64), height.to(torch.int64)), theta)
 
 def segment2box(segment, width=640, height=640):
     # Convert 1 segment label to 1 box label, applying inside-image constraint, i.e. (xy1, xy2, ...) to (xyxy)
@@ -546,7 +579,124 @@ def scale_coords(img1_shape, coords, img0_shape, ratio_pad=None):
     coords[:, :4] /= gain
     clip_coords(coords, img0_shape)
     return coords
+'''
+长边短边的表示方法
+'''
+def cvminAreaRect2longsideformat(x_c, y_c, width, height, theta):
+    '''
+    trans minAreaRect(x_c, y_c, width, height, θ) to longside format(x_c, y_c, longside, shortside, θ)
+    两者区别为:
+            当opencv表示法中width为最长边时（包括正方形的情况），则两种表示方法一致
+            当opencv表示法中width不为最长边 ，则最长边表示法的角度要在opencv的Θ基础上-90度
+    @param x_c: center_x
+    @param y_c: center_y
+    @param width: x轴逆时针旋转碰到的第一条边
+    @param height: 与width不同的边
+    @param theta: x轴逆时针旋转与width的夹角，由于原点位于图像的左上角，逆时针旋转角度为负 [-90, 0)
+    @return:
+            x_c: center_x
+            y_c: center_y
+            longside: 最长边
+            shortside: 最短边
+            theta_longside: 最长边和x轴逆时针旋转的夹角，逆时针方向角度为负 [-180, 0)
+    '''
+    '''
+    意外情况:(此时要将它们恢复符合规则的opencv形式：wh交换，Θ置为-90)
+    竖直box：box_width < box_height  θ=0
+    水平box：box_width > box_height  θ=0
+    '''
+    if theta == 0:
+        theta = -90
+        buffer_width = width
+        width = height
+        height = buffer_width
 
+    if theta > 0:
+        if theta != 90:  # Θ=90说明wh中有为0的元素，即gt信息不完整，无需提示异常，直接删除
+            print('θ计算出现异常，当前数据为：%.16f, %.16f, %.16f, %.16f, %.1f;超出opencv表示法的范围：[-90,0)' % (x_c, y_c, width, height, theta))
+        return False
+
+    if theta < -90:
+        print('θ计算出现异常，当前数据为：%.16f, %.16f, %.16f, %.16f, %.1f;超出opencv表示法的范围：[-90,0)' % (x_c, y_c, width, height, theta))
+        return False
+
+    if width != max(width, height):  # 若width不是最长边
+        longside = height
+        shortside = width
+        theta_longside = theta - 90
+    else:  # 若width是最长边(包括正方形的情况)
+        longside = width
+        shortside = height
+        theta_longside = theta
+
+    if longside < shortside:
+        print('旋转框转换表示形式后出现问题：最长边小于短边;[%.16f, %.16f, %.16f, %.16f, %.1f]' % (x_c, y_c, longside, shortside, theta_longside))
+        return False
+    if (theta_longside < -180 or theta_longside >= 0):
+        print('旋转框转换表示形式时出现问题:θ超出长边表示法的范围：[-180,0);[%.16f, %.16f, %.16f, %.16f, %.1f]' % (x_c, y_c, longside, shortside, theta_longside))
+        return False
+
+    return x_c, y_c, longside, shortside, theta_longside
+
+def clip_poly(poly, img_shape):
+    '''
+        Clip bounding [(x1,y1),(x2,y2),(x3,y3),(x4,y4)] bounding boxes to image shape (height, width)
+    '''
+    poly[:, 0].clip(0, img_shape[1])  # x
+    poly[:, 1].clip(0, img_shape[0])  # y
+
+
+# labels: [x,y,x,y,angle,conf,classid]
+def new_scale_coords(img1_shape, labels, img0_shape, ratio_pad=None):
+    '''
+    Rescale coords (xywh) from img1_shape to img0_shape
+    将检测出的目标边框坐标从 img1_shape 形状放缩到 img0_shape，即反resize+pad，将目标边框对应至初始原图
+    @param img1_shape:  原始形状 (height, width)
+    @param labels: (num ,[ x y longside shortside Θ])
+    @param img0_shape:  目标形状 (height, width)
+    @param ratio_pad:
+    @return:
+            scaled_labels : (num ,[ x y longside shortside Θ])
+    '''
+    if ratio_pad is None:  # calculate from img0_shape
+        gain = min(img1_shape[0] / img0_shape[0], img1_shape[1] / img0_shape[1])  # gain  = old / new
+        pad = (img1_shape[1] - img0_shape[1] * gain) / 2, (img1_shape[0] - img0_shape[0] * gain) / 2  # wh padding
+    else:
+        gain = ratio_pad[0][0]
+        pad = ratio_pad[1]
+
+    scaled_labels = []
+    for i, label in enumerate(labels):
+        # rect=[(x_c,y_c),(w,h),Θ] Θ:flaot[0-179]  -> (-180,0)
+        # rect = longsideformat2cvminAreaRect(label[0], label[1], label[2], label[3], (label[4] - 179.9))
+        # TODO: labels的维度是三维，所以索引label时需要多添加一个维度进行索引
+        rect = longsideformat2cvminAreaRect(label[0], label[1],label[2], label[3], (label[-1]- 179.9))
+
+        # poly = [(x1,y1),(x2,y2),(x3,y3),(x4,y4)]
+
+        poly = cv2.boxPoints(rect)  # 返回rect对应的四个点的值 normalized
+
+        poly[:, 0] -= pad[0]   # x padding
+        poly[:, 1] -= pad[1]   # y padding
+        poly[:, :] /= gain
+        clip_poly(poly, img0_shape)
+
+        rect_scale = cv2.minAreaRect(np.float32(poly))  # 得到最小外接矩形的（中心(x,y), (宽,高), 旋转角度）
+
+        c_x = rect_scale[0][0]
+        c_y = rect_scale[0][1]
+        w = rect_scale[1][0]
+        h = rect_scale[1][1]
+        theta = rect_scale[-1]  # Range for angle is [-90，0)
+
+        label = np.array(cvminAreaRect2longsideformat(c_x, c_y, w, h, theta))
+
+        label[-1] = int(label[-1] + 180.5)  # range int[0,180] 四舍五入
+        if label[-1] == 180:  # range int[0,179]
+            label[-1] = 179
+        scaled_labels.append(label)
+
+    return torch.from_numpy(np.array(scaled_labels))
 
 def clip_coords(boxes, shape):
     # Clip bounding xyxy bounding boxes to image shape (height, width)
@@ -560,17 +710,140 @@ def clip_coords(boxes, shape):
         boxes[:, [1, 3]] = boxes[:, [1, 3]].clip(0, shape[0])  # y1, y2
 
 
+def non_max_suppression_anchor_free(prediction, conf_thres=0.25, iou_thres=0.45, classes=None, agnostic=False, multi_label=False,
+                        labels=(), max_det=300):
+    """
+    @param prediction: shape=torch.Size([4, 42588, 201]->(num_pred, [x,y,w,h,theta,obj,classes])
+    @return: list of detections, on (n,6) tensor per image [xyxy, conf, cls]
+    """
+
+    nc = prediction.shape[2] - 5  # 计算类别数
+    xc = prediction[..., 5] > conf_thres  # 计算mask掩膜，过滤小于conf_thres的数据
+
+    # Checks
+    assert 0 <= conf_thres <= 1, f'Invalid Confidence threshold {conf_thres}, valid values are between 0.0 and 1.0'
+    assert 0 <= iou_thres <= 1, f'Invalid IoU {iou_thres}, valid values are between 0.0 and 1.0'
+
+    # Settings
+    min_wh, max_wh = 2, 4096  # (pixels) minimum and maximum box width and height
+    max_nms = 30000  # maximum number of boxes into torchvision.ops.nms()
+    time_limit = 10.0  # seconds to quit after
+    redundant = True  # require redundant detections
+    multi_label &= nc > 1  # multiple labels per box (adds 0.5ms/img)
+    merge = False  # use merge-NMS
+
+    t = time.time()
+
+    # prediction.shape[0]表示预测出了多少个结果，因此output需要重复prediction.shape[0]次
+    output = [torch.zeros((0, 7), device=prediction.device)] * prediction.shape[0]
+
+    for xi, x in enumerate(prediction):  # image index, image inference
+        # Apply constraints
+        # x[((x[..., 2:4] < min_wh) | (x[..., 2:4] > max_wh)).any(1), 4] = 0  # width-height
+        x = x[xc[xi]]  # xc[xi]表示选出第xi个目标的预测值，它是mask，然后去过滤其对应的输出x；
+
+        # Cat apriori labels if autolabelling
+        if labels and len(labels[xi]):
+            l = labels[xi]
+            v = torch.zeros((len(l), nc + 5 + 180), device=x.device)
+            v[:, :4] = l[:, 1:5]  # box
+            v[:, 4] = 1.0  # conf
+            v[range(len(l)), l[:, 0].long() + 5] = 1.0  # cls
+            v[range(len(l)), l[:, 5].long() + 5 + nc] = 1.0  # angle
+            x = torch.cat((x, v), 0)
+
+        # If none remain process next image
+        if not x.shape[0]:
+            continue
+
+        # Compute conf,修改后：[x,y,w,h,theta,obj,classes], 原始:[x,y,x,y,conf,class,angle]
+        x[:, 6:6 + nc] *= x[:, 5:6]  # conf = obj_conf * cls_conf
+
+        # Get center x, y, w, h
+        xy = x[:, :2]
+        wh = x[:, 2:4]
+
+        # 坐标转换 (center x, center y, width, height) to (x1, y1, x2, y2)
+        box = xywh2xyxy(x[:, :4])
+
+        # Detections matrix nx6 (xyxy, conf, cls)
+        if multi_label: # 如果一个类存在多标签
+            i, j = (x[:, 6:6 + nc] > conf_thres).nonzero(as_tuple=False).T
+            conf_angle, j_angle = x[i, 4].max(1, keepdim=True)
+            x = torch.cat((box[i], x[i, j + 5, None], j[:, None].float(), j_angle.float()), 1)
+            xy = xy[i]
+            wh = wh[i]
+        else:  # best class only
+            conf, j = x[:, 6:6 + nc].max(1, keepdim=True) # 获取对应类别的置信度和其索引值
+            conf_angle, j_angle = x[:, 4:5].max(1, keepdim=True)
+            inds = conf.view(-1) > conf_thres
+            x = torch.cat((box, conf, j.float(), j_angle.float()), 1)[inds]
+            xy = xy[inds]
+            wh = wh[inds]
+
+        # Filter by class
+        if classes is not None:
+            inds = (x[:, 6:7] == torch.tensor(classes, device=x.device)).any(1)
+            x = x[inds]
+            xy = xy[inds]
+            wh = wh[inds]
+
+        # Apply finite constraint
+        # if not torch.isfinite(x).all():
+        #     x = x[torch.isfinite(x).all(1)]
+
+        # Check shape
+        n = x.shape[0]  # number of boxes
+        if not n:  # no boxes
+            continue
+        elif n > max_nms:  # excess boxes
+            keep_inds = x[:, 4].argsort(descending=True)[:max_nms]
+            x = x[keep_inds]  # sort by confidence
+            xy = xy[keep_inds]
+            wh = wh[keep_inds]
+
+        # Batched NMS,修改后：[x,y,w,h,theta,conf,classes], 原始:[x,y,w,h,conf,class,angle]
+        c = x[:, 6:7] * (0 if agnostic else max_wh)  # classes
+        boxes, scores = x[:, :4] + c, x[:, 5]  # boxes (offset by class), scores
+        boxes_xy = (xy + c).int().cpu().numpy().tolist()
+        boxes_wh = wh.int().cpu().numpy().tolist()
+        boxes_angle = x[:, 4].int().cpu().numpy().tolist()
+
+        scores_for_cv2_nms = scores.cpu().numpy()
+        boxes_for_cv2_nms = []
+
+        for box_inds, box_xy in enumerate(boxes_xy):
+            boxes_for_cv2_nms.append((boxes_xy[box_inds], boxes_wh[box_inds], boxes_angle[box_inds]))
+        # i = torchvision.ops.nms(boxes, scores, iou_thres)  # NMS
+
+        i = cv2.dnn.NMSBoxesRotated(boxes_for_cv2_nms, scores_for_cv2_nms, conf_thres, iou_thres)
+        # i = np.squeeze(i, axis=-1) # add, 突然出现的bug，2021年11月9日17:46:22
+
+        if i.shape[0] > max_det:  # limit detections
+            i = i[:max_det]
+        if merge and (1 < n < 3E3):  # Merge NMS (boxes merged using weighted mean)
+            # update boxes as boxes(i,4) = weights(i,n) * boxes(n,4)
+            iou = box_iou(boxes[i], boxes) > iou_thres  # iou matrix
+            weights = iou * scores[None]  # box weights
+            x[i, :4] = torch.mm(weights, x[:, :4]).float() / weights.sum(1, keepdim=True)  # merged boxes
+            if redundant:
+                i = i[iou.sum(1) > 1]  # require redundancy
+
+        output[xi] = x[i]
+        if (time.time() - t) > time_limit:
+            print(f'WARNING: NMS time limit {time_limit}s exceeded')
+            break  # time limit exceeded
+
+    return output
+#------------------------------------------------#
 def non_max_suppression(prediction, conf_thres=0.25, iou_thres=0.45, classes=None, agnostic=False, multi_label=False,
                         labels=(), max_det=300):
     """
-        Runs Non-Maximum Suppression (NMS) on inference results
-
-    Returns:
-         list of detections, on (n,6) tensor per image [xyxy, conf, cls]
+    @param prediction: shape=torch.Size([4, 42588, 201])
+    @return: list of detections, on (n,6) tensor per image [xyxy, conf, cls]
     """
 
     nc = prediction.shape[2] - 5 - 180  # number of classes for anchor based
-    # nc = prediction.shape[2] - 5 - 1  # number of classes for anchor free
     xc = prediction[..., 4] > conf_thres  # candidates
 
     # Checks
@@ -586,11 +859,12 @@ def non_max_suppression(prediction, conf_thres=0.25, iou_thres=0.45, classes=Non
     merge = False  # use merge-NMS
 
     t = time.time()
+    # prediction.shape[0]表示预测出了多少个结果，因此output需要重复prediction.shape[0]次
     output = [torch.zeros((0, 7), device=prediction.device)] * prediction.shape[0]
     for xi, x in enumerate(prediction):  # image index, image inference
         # Apply constraints
         # x[((x[..., 2:4] < min_wh) | (x[..., 2:4] > max_wh)).any(1), 4] = 0  # width-height
-        x = x[xc[xi]]  # confidence
+        x = x[xc[xi]]  # confidence, xc[xi]表示选出第xi个目标的预测值，它是mask，然后去过滤其对应的输出x；
 
         # Cat apriori labels if autolabelling
         if labels and len(labels[xi]):
@@ -624,10 +898,10 @@ def non_max_suppression(prediction, conf_thres=0.25, iou_thres=0.45, classes=Non
             xy = xy[i]
             wh = wh[i]
         else:  # best class only
-            conf, j = x[:, 5:5+nc].max(1, keepdim=True)
-            conf_angle, j_angle = x[:, 5+nc:].max(1, keepdim=True)
-            inds = conf.view(-1) > conf_thres
-            x = torch.cat((box, conf, j.float(), j_angle.float()), 1)[inds]
+            conf, j = x[:, 5:5+nc].max(1, keepdim=True) # 获取对应预测的置信度和其对应的索引值
+            conf_angle, j_angle = x[:, 5+nc:].max(1, keepdim=True) # 返回预测到的角度的置信度即其对应的索引值
+            inds = conf.view(-1) > conf_thres # 得到一个类别的掩膜
+            x = torch.cat((box, conf, j.float(), j_angle.float()), 1)[inds] # x是经过掩膜筛选后的所有结果：[x,y,w,h,classId,angle]
             xy = xy[inds]
             wh = wh[inds]
 
@@ -667,8 +941,8 @@ def non_max_suppression(prediction, conf_thres=0.25, iou_thres=0.45, classes=Non
         # i = torchvision.ops.nms(boxes, scores, iou_thres)  # NMS
         
         i = cv2.dnn.NMSBoxesRotated(boxes_for_cv2_nms, scores_for_cv2_nms, conf_thres, iou_thres)
-        i = np.squeeze(i, axis=-1)
-        
+        # i = np.squeeze(i, axis=-1) # add, 突然出现的bug，2021年11月9日17:46:22
+
         if i.shape[0] > max_det:  # limit detections
             i = i[:max_det]
         if merge and (1 < n < 3E3):  # Merge NMS (boxes merged using weighted mean)
@@ -687,7 +961,7 @@ def non_max_suppression(prediction, conf_thres=0.25, iou_thres=0.45, classes=Non
     return output
 
 
-def strip_optimizer(f='best.pt', s=''):  # from utils.general import *; strip_optimizer()
+def strip_optimizer(f='pre-train-model.pt', s=''):  # from utils.general import *; strip_optimizer()
     # Strip optimizer from 'f' to finalize training, optionally save as 's'
     x = torch.load(f, map_location=torch.device('cpu'))
     if x.get('ema'):
@@ -881,7 +1155,7 @@ def merge_imgs(imgs, row_col_num):
     return merge_imgs
 
 # 显示图片
-def show_img(imgs, window_names=None, wait_time_ms=0, is_merge=False, row_col_num=(1, -1)):
+def show_img(imgs,window_names=None, wait_time_ms=0, is_merge=False, row_col_num=(1, -1)):
     """
         Displays an image or a list of images in specified windows or self-initiated windows.
         You can also control display wait time by parameter 'wait_time_ms'.
@@ -915,9 +1189,10 @@ def show_img(imgs, window_names=None, wait_time_ms=0, is_merge=False, row_col_nu
         for img, win_name in zip(imgs, window_names):
             if img is None:
                 continue
-            win_name = str(win_name)
-            cv2.namedWindow(win_name, 0)
-            cv2.imshow(win_name, img)
+            win_name = str(win_name).split('/')[-1]
+            cv2.imwrite("vis_result/%s.png"%(win_name),img)
+            # cv2.namedWindow(win_name, 0)
+            # cv2.imshow(win_name, img)
 
     cv2.waitKey(wait_time_ms)
 # 显示bbox
@@ -961,6 +1236,7 @@ def show_bbox(image, bboxs_list, color=None,
             mask2 = cv2.addWeighted(mask1, 0.5, mask2, 8, 0.0)
             image_copy = cv2.addWeighted(image_copy, 1.0, mask2, 0.6, 0.0)
         if len(bbox) == 5 or len(bbox) == 6:
+
             cv2.putText(image_copy, txt, (bbox_f[0], bbox_f[1] - 2),
                         font, font_scale, (255, 255, 255), thickness=thickness, lineType=cv2.LINE_AA)
     if is_show:
@@ -983,12 +1259,12 @@ def vis_bbox(imgs, targets):
         show_bbox(img, y)
 
 # 可视化匹配关系
-def vis_match(imgs, targets, tcls, tboxs, indices, anchors, pred, ttars):
+def vis_match(imgs, targets, tcls, tboxs, indices, anchors, pred, ttars,img_path):
     tar = targets.cpu().detach().numpy()
     data = imgs * 255
     data = data.permute(0, 2, 3, 1).cpu().detach().numpy()
     h, w = data.shape[1], data.shape[2]
-    gain = np.ones(6)
+    gain = np.ones(7)
     gain[2:6] = np.array([w, h, w, h])
     tar = (tar * gain)
 
@@ -1035,9 +1311,10 @@ def vis_match(imgs, targets, tcls, tboxs, indices, anchors, pred, ttars):
             anchor_bbox = np.concatenate([anchor_bbox, anchor], axis=1)
             anchor_bbox1 = xywh2xyxy(anchor_bbox)
             # 正样本anchor可视化
-            img1 = show_bbox(img1, anchor_bbox1, color=(0, 255, 255), is_show=False)
+            img1 = show_bbox(img1, anchor_bbox1, color=(0, 255, 255), is_show=False,names="vis_result/%s.png"%(j))
             vis_imgs.append(img1)
-        show_img(vis_imgs, is_merge=True)
+
+        show_img(vis_imgs,is_merge=False)
 #################################################################################
 #################################################################################
 

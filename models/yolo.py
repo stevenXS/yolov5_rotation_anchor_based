@@ -11,6 +11,7 @@ import sys
 from copy import deepcopy
 from pathlib import Path
 
+import numpy as np
 import torch
 
 FILE = Path(__file__).absolute()
@@ -38,12 +39,12 @@ class Detect(nn.Module):
     stride = None  # strides computed during build
     onnx_dynamic = False  # ONNX export parameter
 
-    def __init__(self, nc=16, anchors=(), ch=(), inplace=True):  # detection layer
+    def __init__(self, nc=80, anchors=(), ch=(), inplace=True):  # detection layer
         super().__init__()
         self.nc = nc  # number of classes
         self.no = nc + 5 + 180  # number of outputs per anchor, 180 mean angle classifications.
         self.nl = len(anchors)  # number of detection layers
-        self.na = len(anchors[0]) // 2  # number of anchors，3
+        self.na = len(anchors[0]) // 2  # number of anchors
         self.grid = [torch.zeros(1)] * self.nl  # init grid
         a = torch.tensor(anchors).float().view(self.nl, -1, 2)
         self.register_buffer('anchors', a)  # shape(nl,na,2)
@@ -54,6 +55,7 @@ class Detect(nn.Module):
     def forward(self, x):
         z = []  # inference output
 
+        # self.training = False
         for i in range(self.nl):
             x[i] = self.m[i](x[i])  # conv
             bs, _, ny, nx = x[i].shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
@@ -63,7 +65,6 @@ class Detect(nn.Module):
                 if self.grid[i].shape[2:4] != x[i].shape[2:4] or self.onnx_dynamic:
                     self.grid[i] = self._make_grid(nx, ny).to(x[i].device)
 
-                # y: torch.Size([1, 1, 4, 4, 265])
                 y = x[i].sigmoid()
                 if self.inplace:
                     y[..., 0:2] = (y[..., 0:2] * 2. - 0.5 + self.grid[i]) * self.stride[i]  # xy
@@ -120,6 +121,7 @@ class BaseConv(nn.Module):
     将传统的检测头几个任务进行解耦，一般用1x1卷积进行通道降维，然后再接3*3卷积:
         回归分支再解耦：box（H*W*4） + object（H*W*1）；
         分类分支：class（（H*W*C）；
+    基于YOLOX思想的检测头
 '''
 class Detect_AnchorFree_Decoupled(nn.Module):
     stride = None  # strides computed during build
@@ -159,6 +161,7 @@ class Detect_AnchorFree_Decoupled(nn.Module):
         self.obj_pred = nn.ModuleList() # 一个1x1的卷积，把通道数变成1通道，obj
         self.angle_preds = nn.ModuleList() # angle，预测一个通道
         self.stems = nn.ModuleList() # 进行通道压缩的卷积
+        self.strides = [8,16,32] # 每一个特征层的采样步长
 
         # 3种不同尺度的输出进行初始化卷积
         # 同时生成grid，为build_target_anchor_free处理正样本anchor做准备
@@ -182,8 +185,6 @@ class Detect_AnchorFree_Decoupled(nn.Module):
             self.obj_pred.append(nn.Conv2d(in_channels=int(ch[i]), out_channels=self.na * 1, kernel_size=1,stride=1))
             self.angle_preds.append(nn.Conv2d(in_channels=int(ch[i]), out_channels=1, kernel_size=1,stride=1))
 
-
-
     def forward(self, x):
         '''
         相当于最后生成的feature map分辨率为size1 × size2.即映射到原图，有size1 × size2个锚点，以锚点为中心生成锚框来获取Region proposals，每个锚点代表一个[xywh,score,num_classes]向量
@@ -206,7 +207,7 @@ class Detect_AnchorFree_Decoupled(nn.Module):
             '''
             先进行通道压缩
             '''
-            xi= self.stems[i](xi) # 依次处理三层feature
+            # xi= self.stems[i](xi) # 依次处理三层feature
 
             # 分别进行解耦卷积
             cls_x = xi
@@ -224,35 +225,45 @@ class Detect_AnchorFree_Decoupled(nn.Module):
             # 角度的输出
             angle_output = self.angle_preds[i](reg_feat) # 角度的输出同样用到回归的数据
 
-            # 对每一层的结果进行拼接
-            '''
-                reg_output=()
-            '''
+            # 对每一层的结果进行拼接,
             x[i] = torch.cat([reg_output, angle_output, obj_output, cls_output], 1)
             # print(x[i].shape)
 
             bs, _, ny, nx = x[i].shape  # x[i]:(batch_size, (5+nc) * na, size1', size2')
 
-            x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
+            # 将特征图进行乘操作，例如24,24->24*24
+            # x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
+            x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).reshape(
+                bs, self.na * ny * nx, -1
+            )
 
             # 构建grid
             if self.grid[i].shape[2:4] != x[i].shape[2:4]:
                 grid = self._make_grid(nx, ny).to(x[i].device)
                 self.grid[i] = grid.view(1,-1,2) # size=(1,h_size*w_size,2)
+
+            # self.training = False # add
+
             # inference推理模式,相当于解码操作
-            # if not self.training:
-            #     # 以height为y轴，width为x轴的grid坐标 坐标按顺序（0, 0） （1, 0）... (width-1, 0) (0, 1) (1,1) ... (width-1, 1) ... (width-1 , height-1)
-            #     if self.grid[i].shape[2:4] != x[i].shape[2:4]:
-            #         self.grid[i] = self._make_grid(nx, ny).to(x[i].device)
-            #
-            #     y = x[i].sigmoid() # 归一化处理
-            #
-            #     # xy 预测的真实坐标 y[..., 0:2] * 2. - 0.5是相对于左上角网格的偏移量； self.grid[i]是网格坐标索引
-            #     y[..., 0:2] = (y[..., 0:2] * 2. - 0.5 + self.grid[i].to(x[i].device)) * self.stride[i]
-            #
-            #     # wh 预测的真实wh  self.anchor_grid[i]是原始anchors宽高  (y[..., 2:4] * 2) ** 2 是预测出的anchors的wh倍率
-            #     y[..., 2:4] = (y[..., 2:4] * 2) ** 2 * self.anchor_grid[i]
-            #     z.append(y.view(bs, -1, self.no))
+            if not self.training:
+                hsize, wsize = int(np.sqrt(self.grid[i].shape[1])), int(np.sqrt(self.grid[i].shape[1]))
+
+                # y = x[i].sigmoid() # 归一化处理
+                y = x[i] # 归一化处理
+
+                yv, xv = torch.meshgrid([torch.arange(hsize), torch.arange(wsize)])
+                grid = torch.stack((xv, yv), 2).view(1, -1, 2)
+
+                shape = self.grid[i].shape[:2]
+                stride=(torch.full((*shape, 1),  self.strides[i])).to(x[i].device)
+
+                # grids = torch.cat(grids, dim=1).to(x[i].device)
+                # strides = torch.cat(strides, dim=1).to(x[i].device)
+
+                y[..., 0:2] = (y[..., 0:2] + grid.to(x[i].device)) * stride # xy
+                y[..., 2:4] = torch.exp(y[..., 2:4]) * stride # wh
+                y[..., 4] = ((y[..., 4]).sigmoid() - 0.5) * 180 # add angle
+                z.append(y.view(bs, -1, self.no))
 
         return x if self.training else (torch.cat(z, 1), x)
 
@@ -274,39 +285,94 @@ class Detect_AnchorFree_Decoupled(nn.Module):
 '''
     修改为anchor-free的耦合头
 '''
-class Detect_AnchorFree(nn.Module):
+class Detect_Decoupled(nn.Module):
     stride = None  # strides computed during build
     onnx_dynamic = False  # ONNX export parameter
 
-    def __init__(self, nc=80, anchors=1, ch=(), inplace=True):  # detection layer
+    def __init__(self, nc=80, anchors=(), ch=(), inplace=True):  # detection layer
         super().__init__()
         '''
-            1.采用了AnchorFree后，每个cell只预测一个框，因此anchor的种类=1；
-            2.对于角度问题，每一层的输出增加了180个角度的分类值(原本的YOLO是耦合到每一层的输出)，这里考虑解耦到单独的一个卷积进行预测
+            采用了AnchorFree后，每个cell只预测一个框，因此anchor的种类=1；
+            这里值减少了anchor种类的参数量
         '''
         self.nc = nc  # number of classes
-        self.no = nc + 5# number of outputs per anchor,[x,y,w,h,score,angle]
-        self.nl = len(ch)  # number of detection layers
-        self.na = 1  # 每一层的每一个cell只预测一种anchor，这样就避免预设anchor值
+        self.no = nc + 5 + 180 # number of outputs per anchor,[x,y,w,h,score,angle]
+        self.nl = len(anchors)  # number of detection layers
+        self.na = len(anchors[0]) // 2  # number of anchors
         self.grid = [torch.zeros(1)] * self.nl  # 初始化网格
         a = torch.tensor(anchors).float().view(self.nl, -1, 2)
         self.register_buffer('anchors', a)  # shape(nl,na,2)
         self.register_buffer('anchor_grid', a.clone().view(self.nl, 1, -1, 1, 1, 2))  # shape(nl,1,na,1,1,2)
-        self.m = nn.ModuleList(nn.Conv2d(x, self.no * self.na, 1) for x in ch)  # 构建检测头的三层输出卷积
-        self.angle_preds = nn.ModuleList(nn.Conv2d(in_channels=x,out_channels=1,kernel_size=1) for x in ch)# 构建角度预测的卷积
+        # 将此卷积进行解耦操作，其他不变
+
         self.inplace = inplace  # use in-place ops (e.g. slice assignment)
+        # 对【self.m = nn.ModuleList(nn.Conv2d(x, self.no * self.na, 1) for x in ch)】”分类“和”回归“任务进行解耦
+        self.cls_conv = nn.ModuleList()  # 分类卷积
+        self.reg_conv = nn.ModuleList()  # 回归卷积
+
+        self.act = 'relu'  # 激活函数形式
+        self.cls_pred = nn.ModuleList()  # 一个1x1的卷积，把通道数变成类别数，比如coco 16类
+        self.reg_pred = nn.ModuleList()  # 一个1x1的卷积，把通道数变成4通道，xywh.
+        self.obj_pred = nn.ModuleList()  # 一个1x1的卷积，把通道数变成1通道，obj
+        self.angle_preds = nn.ModuleList()  # angle，预测一个通道
+        # self.stems = nn.ModuleList()  # 进行通道压缩的卷积
+
+        # 3种不同尺度的输出进行初始化卷积
+        # 同时生成grid，为build_target_anchor_free处理正样本anchor做准备
+        for i in range(len(ch)):
+            # 构建1*1卷积进行通道降维
+            # self.stems.append(
+            #     BaseConv(in_channels=(int(ch[i])), out_channels=int(ch[i]), ksize=1, stride=1, act=self.act))
+
+            # 构建分类和回归任务的3*3卷积，这里只使用一层BaseConv，考虑复杂度的问题
+            self.cls_conv.append(nn.Sequential(*[
+                BaseConv(in_channels=(int(ch[i])), out_channels=int(ch[i]), ksize=3, stride=1, act=self.act)
+                # BaseConv(in_channels=(int(ch[i])), out_channels=int(ch[i]),ksize=3,stride=1,act=self.act),
+            ]))
+            self.reg_conv.append(nn.Sequential(*[
+                BaseConv(in_channels=(int(ch[i])), out_channels=int(ch[i]), ksize=3, stride=1, act=self.act)
+                # BaseConv(in_channels=(int(ch[i])), out_channels=int(ch[i]), ksize=3, stride=1, act=self.act),
+            ]))
+
+            # 构建预测的卷积
+            self.cls_pred.append(nn.Conv2d(in_channels=int(ch[i]), out_channels=self.nc * self.na, kernel_size=1, stride=1))
+            self.reg_pred.append(nn.Conv2d(in_channels=int(ch[i]), out_channels=4 * self.na, kernel_size=1, stride=1))
+            self.obj_pred.append(nn.Conv2d(in_channels=int(ch[i]), out_channels=1 * self.na, kernel_size=1, stride=1))
+            self.angle_preds.append(nn.Conv2d(in_channels=int(ch[i]), out_channels=180 * self.na, kernel_size=1, stride=1))
 
     def forward(self, x):
         z = []  # inference output
 
-        for i in range(self.nl):
-            angle_feat = x[i] # add
-            angle_output = self.angle_preds[i](angle_feat) # add
-            x[i] = self.m[i](x[i])  # conv
-            # x[i] = torch.cat([x[i],angle_output],1) # 将角度的预测结果与原结果进行拼接
+        for i, (cls_conv, reg_conv, xi) in enumerate(
+                zip(self.cls_conv, self.reg_conv, x)):
 
-            bs, _, ny, nx = x[i].shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
+            # 分别进行解耦卷积
+            cls_x = xi
+            reg_x = xi
+
+            # 分类的输出
+            cls_feat = cls_conv(cls_x)
+            cls_output = self.cls_pred[i](cls_feat)
+
+            # 回归的输出
+            reg_feat = cls_conv(reg_x)
+            reg_output = self.reg_pred[i](reg_feat)  # 坐标的输出
+            obj_output = self.obj_pred[i](reg_feat)  # obj的输出
+
+            # 角度的输出
+            angle_output = self.angle_preds[i](reg_feat)  # 角度的输出同样用到回归的数据
+
+            # 对每一层的结果进行拼接
+            x[i] = torch.cat([reg_output, angle_output, obj_output, cls_output], 1)
+            # print(x[i].shape)
+
+            bs, _, ny, nx = x[i].shape  # x[i]:(batch_size, (5+nc) * na, size1', size2')
+
+            # 不进行特征图合并，保持与Detect一致
             x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
+            # x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).reshape(
+            #     bs, self.na * ny * nx, -1
+            # )
 
             if not self.training:  # inference
                 if self.grid[i].shape[2:4] != x[i].shape[2:4] or self.onnx_dynamic:
@@ -328,7 +394,6 @@ class Detect_AnchorFree(nn.Module):
     def _make_grid(nx=20, ny=20):
         yv, xv = torch.meshgrid([torch.arange(ny), torch.arange(nx)])
         return torch.stack((xv, yv), 2).view((1, 1, ny, nx, 2)).float()
-
 
 
 #----------------------------------------------------#
@@ -368,6 +433,119 @@ class ASFF_Detect(nn.Module):   #add ASFFV5 layer and Rfb
             x[i] = self.m[i](x[i])  # conv
             bs, _, ny, nx = x[i].shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
             x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
+
+            if not self.training:  # inference
+                if self.grid[i].shape[2:4] != x[i].shape[2:4] or self.onnx_dynamic:
+                    self.grid[i] = self._make_grid(nx, ny).to(x[i].device)
+
+                y = x[i].sigmoid()
+                if self.inplace:
+                    y[..., 0:2] = (y[..., 0:2] * 2. - 0.5 + self.grid[i]) * self.stride[i]  # xy
+                    y[..., 2:4] = (y[..., 2:4] * 2) ** 2 * self.anchor_grid[i]  # wh
+                else:  # for YOLOv5 on AWS Inferentia https://github.com/ultralytics/yolov5/pull/2953
+                    xy = (y[..., 0:2] * 2. - 0.5 + self.grid[i]) * self.stride[i]  # xy
+                    wh = (y[..., 2:4] * 2) ** 2 * self.anchor_grid[i].view(1, self.na, 1, 1, 2)  # wh
+                    y = torch.cat((xy, wh, y[..., 4:]), -1)
+                z.append(y.view(bs, -1, self.no))
+
+        return x if self.training else (torch.cat(z, 1), x)
+
+    @staticmethod
+    def _make_grid(nx=20, ny=20):
+        yv, xv = torch.meshgrid([torch.arange(ny), torch.arange(nx)])
+        return torch.stack((xv, yv), 2).view((1, 1, ny, nx, 2)).float()
+
+
+'''
+基于FCOS的检测头，2021年11月21日14:53:47
+'''
+class Detect_AnchorFree_FCOS(nn.Module):
+    def __init__(self, nc=16, anchors=(), ch=(), inplace=True):  # detection layer
+        super().__init__()
+
+        self.nc = nc  # number of classes
+        self.no = nc + 4 + 1 + 1 # number of outputs per anchor,[t,l,r,b,ness,angle]
+        self.nl = len(anchors)  # number of detection layers
+        self.na = len(anchors[0]) // 2  # number of anchors
+        self.grid = [torch.zeros(1)] * self.nl  # 初始化网格
+        a = torch.tensor(anchors).float().view(self.nl, -1, 2)
+        self.register_buffer('anchors', a)  # shape(nl,na,2)
+        self.register_buffer('anchor_grid', a.clone().view(self.nl, 1, -1, 1, 1, 2))  # shape(nl,1,na,1,1,2)
+        # 将此卷积进行解耦操作，其他不变
+
+        self.inplace = inplace  # use in-place ops (e.g. slice assignment)
+        # 对【self.m = nn.ModuleList(nn.Conv2d(x, self.no * self.na, 1) for x in ch)】”分类“和”回归“任务进行解耦
+        self.cls_conv = nn.ModuleList()  # 分类卷积
+        self.reg_conv = nn.ModuleList()  # 回归卷积
+
+        self.act = 'relu'  # 激活函数形式
+        self.cls_pred = nn.ModuleList()  # 一个1x1的卷积，把通道数变成类别数，比如coco 16类
+        self.center_ness = nn.ModuleList()  # 中心度预测，不使用obj区分前景或背景
+
+        self.reg_pred = nn.ModuleList()  # 一个1x1的卷积，把通道数变成4通道， t,l,r,b.
+        self.angle_preds = nn.ModuleList()  # angle，预测一个通道
+
+        # 3种不同尺度的输出进行初始化卷积
+        # 同时生成grid，为build_target_anchor_free处理正样本anchor做准备
+        for i in range(len(ch)):
+
+            # 构建分类和回归任务的3*3卷积，这里只使用一层BaseConv，考虑复杂度的问题
+            self.cls_conv.append(nn.Sequential(*[
+                BaseConv(in_channels=(int(ch[i])), out_channels=int(ch[i]), ksize=3, stride=1, act=self.act)
+            ]))
+
+            self.reg_conv.append(nn.Sequential(*[
+                BaseConv(in_channels=(int(ch[i])), out_channels=int(ch[i]), ksize=3, stride=1, act=self.act)
+            ]))
+
+            # 构建预测的卷积
+            self.cls_pred.append(
+                nn.Conv2d(in_channels=int(ch[i]), out_channels=self.nc * self.na, kernel_size=1, stride=1)
+            )
+            self.center_ness.append(
+                nn.Conv2d(in_channels=int(ch[i]), out_channels=1 * self.na, kernel_size=1, stride=1)
+            )  # 最后输出一个分数，他与class是一个分支
+
+            self.reg_pred.append(
+                nn.Conv2d(in_channels=int(ch[i]), out_channels=4 * self.na, kernel_size=1, stride=1)
+            )
+            self.angle_preds.append(
+                nn.Conv2d(in_channels=int(ch[i]), out_channels=180 * self.na, kernel_size=1, stride=1)
+            )
+
+    def forward(self, x):
+        z = []  # inference output
+
+        for i, (cls_conv, reg_conv, xi) in enumerate(
+                zip(self.cls_conv, self.reg_conv, x)):
+
+            # 分别进行解耦卷积
+            cls_x = xi
+            reg_x = xi
+
+            # 分类的输出
+            cls_feat = cls_conv(cls_x)
+            cls_output = self.cls_pred[i](cls_feat)
+
+            # 回归的输出
+            reg_feat = cls_conv(reg_x)
+            reg_output = self.reg_pred[i](reg_feat)  # 坐标的输出
+            obj_output = self.obj_pred[i](reg_feat)  # obj的输出
+
+            # 角度的输出
+            angle_output = self.angle_preds[i](reg_feat)  # 角度的输出同样用到回归的数据
+
+            # 对每一层的结果进行拼接
+            x[i] = torch.cat([reg_output, angle_output, obj_output, cls_output], 1)
+            # print(x[i].shape)
+
+            bs, _, ny, nx = x[i].shape  # x[i]:(batch_size, (5+nc) * na, size1', size2')
+
+            # 不进行特征图合并，保持与Detect一致
+            x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
+            # x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).reshape(
+            #     bs, self.na * ny * nx, -1
+            # )
 
             if not self.training:  # inference
                 if self.grid[i].shape[2:4] != x[i].shape[2:4] or self.onnx_dynamic:
@@ -430,8 +608,18 @@ class Model(nn.Module):
             self.stride = m.stride
             self._initialize_biases()  # only run once
             print('Strides: %s' % m.stride.tolist())
-
+        # add
         elif isinstance(m, ASFF_Detect):
+            s = 256  # 2x min stride
+            m.inplace = self.inplace
+            m.stride = torch.tensor([s / x.shape[-2] for x in self.forward(torch.zeros(1, ch, s, s))])  # forward
+            m.anchors /= m.stride.view(-1, 1, 1)
+            # check_anchor_order(m)
+            self.stride = m.stride
+            self._initialize_biases()  # only run once
+            print('Strides: %s' % m.stride.tolist())
+        # add
+        elif isinstance(m, Detect_Decoupled):
             s = 256  # 2x min stride
             m.inplace = self.inplace
             m.stride = torch.tensor([s / x.shape[-2] for x in self.forward(torch.zeros(1, ch, s, s))])  # forward
@@ -443,10 +631,10 @@ class Model(nn.Module):
 
         # 构建anchor free的检测头
         elif isinstance(m, Detect_AnchorFree_Decoupled):
-            s = 128
-            m.stride = torch.tensor([s / x.shape[-2] for x in self.forward(torch.zeros(1, ch, s, s))])  # forward
-            # m.anchors /= m.stride.view(-1, 1, 1)
-            # check_anchor_order(m)
+            s = 256
+            # 计算步长时，由于检测头的最后一层将size1与size2合并了，所以计算步长需要去平方根
+            m.stride = torch.tensor([s / np.sqrt(x.shape[-2]) for x in self.forward(torch.zeros(1, ch, s, s))])  # forward
+            # m.stride = torch.tensor([s / x.shape[-2] for x in self.forward(torch.zeros(1, ch, s, s))])  # forward
             self.stride = m.stride
             self._initialize_biases()
             print('Strides: %s' % m.stride.tolist())
@@ -512,6 +700,7 @@ class Model(nn.Module):
 
             # 进行前向传播计算
             x = m(x)  # run
+
             y.append(x if m.i in self.save else None)  # save output
 
             # 可视化特征图，2021-10-17 17:26:41
@@ -552,24 +741,49 @@ class Model(nn.Module):
                 b.data[:, 5:] += math.log(0.6 / (m.nc - 0.99)) if cf is None else torch.log(cf / cf.sum())  # cls
                 mi.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
 
+        # AnchorBased+解耦检测头, add
+        if isinstance(m, Detect_Decoupled):
+            # add, 因为修改了检测头中的m卷积层（耦合头变为解耦头）
+            for mi, s in zip(m.cls_pred, m.stride):
+                b = mi.bias.view(m.na, -1)
+                with torch.no_grad():  # windows环境需要添加该语句，add
+                    b[:, 4] += math.log(8 / (640 / s) ** 2)  # obj (8 objects per 640 image)
+                    b[:, 5:] += math.log(0.6 / (m.nc - 0.99)) if cf is None else torch.log(cf / cf.sum())  # cls
+                    mi.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
+            for mj, s in zip(m.obj_pred, m.stride):  # add,obj
+                b = mj.bias.view(m.na, -1)
+                with torch.no_grad():  # windows环境需要添加该语句，add
+                    b.data.fill_(-math.log((1 - 1e-2) / 1e-2))  # 初始化偏置
+                    mj.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
+
+            # add,初始化角度的偏置变量
+            for mk in m.angle_preds:
+                b = mk.bias.view(1, -1)
+                with torch.no_grad():  # windows环境需要添加该语句，add
+                    b.data.fill_(-math.log((1 - 1e-2) / 1e-2))
+                    mk.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
+
         # add
         if isinstance(m, Detect_AnchorFree_Decoupled):
             # add, 因为修改了检测头中的m卷积层（耦合头变为解耦头）
             for mi, s in zip(m.cls_pred, m.stride):
-                # cls
                 b = mi.bias.view(m.na, -1)
-                b[:, 4] += math.log(8 / (640 / s) ** 2)  # obj (8 objects per 640 image)
-                b[:, 5:] += math.log(0.6 / (m.nc - 0.99)) if cf is None else torch.log(cf / cf.sum())  # cls
-                mi.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
+                with torch.no_grad(): # windows环境需要添加该语句，add
+                    b[:, 4] += math.log(8 / (640 / s) ** 2)  # obj (8 objects per 640 image)
+                    b[:, 5:] += math.log(0.6 / (m.nc - 0.99)) if cf is None else torch.log(cf / cf.sum())  # cls
+                    mi.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
             for mj, s in zip(m.obj_pred, m.stride): # add,obj
                 b= mj.bias.view(m.na, -1)
-                b.data.fill_(-math.log((1 - 1e-2) / 1e-2)) # 初始化偏置
-                mj.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
+                with torch.no_grad():  # windows环境需要添加该语句，add
+                    b.data.fill_(-math.log((1 - 1e-2) / 1e-2)) # 初始化偏置
+                    mj.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
+
             # add,初始化角度的偏置变量
             for mk in m.angle_preds:
                 b = mk.bias.view(1, -1)
-                b.data.fill_(-math.log((1 - 1e-2) / 1e-2))
-                mk.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
+                with torch.no_grad():  # windows环境需要添加该语句，add
+                    b.data.fill_(-math.log((1 - 1e-2) / 1e-2))
+                    mk.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
 
     def _print_biases(self):
         m = self.model[-1]  # Detect() module
@@ -640,7 +854,6 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
         elif m is Detect: # 检测头
             # args=(80,[]
             args.append([ch[x] for x in f])
-
             if isinstance(args[1], int):  # number of anchors
                 args[1] = [list(range(args[1] * 2))] * len(f)
 
@@ -650,8 +863,8 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
             if isinstance(args[1], int):  # number of anchors
                 args[1] = [list(range(args[1] * 2))] * len(f)
 
-        # 增加AnchorFree的【耦合】检测头，2021年11月1日10:46:04
-        elif m is Detect_AnchorFree:
+        # 将原始检测头进行解耦-AnchorBased，2021年11月1日10:46:04
+        elif m is Detect_Decoupled:
             args.append([ch[x] for x in f])
             if isinstance(args[1], int):  # number of anchors
                 args[1] = [list(range(args[1] * 2))] * len(f)
@@ -691,7 +904,9 @@ if __name__ == '__main__':
         yolov5m-asff: 10948910
     """
     parser = argparse.ArgumentParser()
-    parser.add_argument('--cfg', type=str, default='yolov5m.yaml', help='model.yaml')
+    parser.add_argument('--cfg', type=str, default='yolov5m-dcoupled-head.yaml', help='model.yaml')
+    # parser.add_argument('--cfg', type=str, default='yolov5m-anchor-free-decoupled.yaml', help='model.yaml')
+    # parser.add_argument('--cfg', type=str, default='yolov5m.yaml', help='model.yaml')
     parser.add_argument('--device', default='0', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     parser.add_argument('--profile', action='store_true', help='profile model speed')
     opt = parser.parse_args()
@@ -702,9 +917,10 @@ if __name__ == '__main__':
 
     # Create model
     model = Model(opt.cfg).to(device)
-    # # model.train()
+    # model.train()
+
     x = torch.rand(1,3,224,224).to(device)
-    # res = model(x)
+    res = model(x)
     #
     # for x in res:
     #     print(x.shape)

@@ -7,6 +7,7 @@ Usage:
 """
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -23,7 +24,7 @@ from models.experimental import attempt_load
 from utils.datasets import LoadStreams, LoadImages
 from utils.general import check_img_size, check_imshow, check_requirements, check_suffix, colorstr, is_ascii, \
     non_max_suppression, apply_classifier, scale_coords, xyxy2xywh, strip_optimizer, set_logging, increment_path, \
-    save_one_box
+    save_one_box, longsideformat2cvminAreaRect,new_scale_coords
 from utils.plots import Annotator, colors
 from utils.torch_utils import select_device, load_classifier, time_sync
 
@@ -180,7 +181,8 @@ def run(weights='yolov5s.pt',  # model.pt path(s)
 
             p = Path(p)  # to Path
             save_path = str(save_dir / p.name)  # img.jpg
-            txt_path = str(save_dir / 'labels' / p.stem) + ('' if dataset.mode == 'image' else f'_{frame}')  # img.txt
+            # txt_path = str(save_dir / 'labels' / p.stem) + ('' if dataset.mode == 'image' else f'_{frame}')  # img.txt
+            txt_path = str(save_dir / 'labels') + ('' if dataset.mode == 'image' else f'_{frame}')  # TODO:修改路劲
             s += '%gx%g ' % img.shape[2:]  # print string
             gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
             imc = im0.copy() if save_crop else im0  # for save_crop
@@ -188,6 +190,7 @@ def run(weights='yolov5s.pt',  # model.pt path(s)
             if len(det):
                 # Rescale boxes from img_size to im0 size
                 det[:, :4] = scale_coords(img.shape[2:], det[:, :4], im0.shape).round()
+                # det[:,:] = new_scale_coords(img.shape[2:], det[:, :], im0.shape).round() # add，2021年11月23日20:08:30
 
                 # Print results
                 for c in det[:, -2].unique():
@@ -196,11 +199,36 @@ def run(weights='yolov5s.pt',  # model.pt path(s)
 
                 # Write results
                 for *xyxy, conf, cls, angle in reversed(det):
+
+                    # TODO,add-2021年11月23日20:08:15
                     if save_txt:  # Write to file
-                        xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
-                        line = (cls, *xywh, conf, angle) if save_conf else (cls, *xywh, angle)  # label format
-                        with open(txt_path + '.txt', 'a') as f:
-                            f.write(('%g ' * len(line)).rstrip() % line + '\n')
+                        classname = '%s' % names[int(cls)]
+                        conf_str = '%.3f' % conf # tensor to Float
+                        # 长边转短边，不进行坐标归一化
+                        xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4))).view(-1).tolist()  # normalized xywh
+                        rect = longsideformat2cvminAreaRect(xywh[0],xywh[1],xywh[2],xywh[3],(angle- 179.9))
+                        poly = np.float32(cv2.boxPoints(rect))  # 返回rect对应的四个点的值
+                        poly = np.int0(poly).reshape(8)
+                        split_name = Path(p).stem.split('_')
+                        origin_name = split_name[0]
+                        # TODO: txt:[imag_name, conf , x1,y1, x2,y2, x3,y3, x4,y4, class_name],保存格式方便使用cocoAPI评估
+                        line = Path(p).stem + ' ' + conf_str + ' ' + ' '.join(list(map(str, poly))) + ' ' + classname
+                        # if os.path.exists(txt_path): # 如果之前存在文件夹，重新覆盖该文件夹
+                        #     os.makedirs(txt_path)
+                        with open(str(txt_path + '/' + origin_name) + '.txt', 'a') as f:
+                            f.writelines(line + '\n')
+
+                    # 源代码
+                    # if save_txt:  # Write to file
+                    #     classname = '%s' % names[int(cls)]
+                    #     conf_str = '%s.3f' % conf
+                    #
+                    #     xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
+                    #
+                    #     line = (cls, *xywh, conf, angle) if save_conf else (cls, *xywh, angle)  # label format
+                    #
+                    #     with open(txt_path + '.txt', 'a') as f:
+                    #         f.write(('%g ' * len(line)).rstrip() % line + '\n')
 
                     if save_img or save_crop or view_img:  # Add bbox to image
                         c = int(cls)  # integer class
@@ -249,15 +277,15 @@ def run(weights='yolov5s.pt',  # model.pt path(s)
 
 def parse_opt():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--weights', nargs='+', type=str, default='weights/best.pt', help='model.pt path(s)')
-    parser.add_argument('--source', type=str, default=r'E:\Datasets\rotate_val\images', help='file/dir/URL/glob, 0 for webcam')
-    parser.add_argument('--imgsz', '--img', '--img-size', nargs='+', type=int, default=[1024], help='inference size h,w')
+    parser.add_argument('--weights', nargs='+', type=str, default='/home/fofo/A/xsq/YOLOv5_DOTAv1.5_OBB.pt', help='model.pt path(s)')
+    parser.add_argument('--source', type=str, default=r'/home/fofo/A/xsq/datasets/dota-v15/rotate_val/images', help='file/dir/URL/glob, 0 for webcam')
+    parser.add_argument('--imgsz', '--img', '--img-size', nargs='+', type=int, default=[800], help='inference size h,w')
     parser.add_argument('--conf-thres', type=float, default=0.1, help='confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.5, help='NMS IoU threshold')
     parser.add_argument('--max-det', type=int, default=1000, help='maximum detections per image')
-    parser.add_argument('--device', default='0', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
+    parser.add_argument('--device', default='2', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     parser.add_argument('--view-img', action='store_true', help='show results')
-    parser.add_argument('--save-txt', action='store_true', help='save results to *.txt')
+    parser.add_argument('--save-txt', default=True, action='store_true', help='save results to *.txt')
     parser.add_argument('--save-conf', action='store_true', help='save confidences in --save-txt labels')
     parser.add_argument('--save-crop', action='store_true', help='save cropped prediction boxes')
     parser.add_argument('--nosave', action='store_true', help='do not save images/videos')

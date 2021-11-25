@@ -38,7 +38,7 @@ from utils.general import labels_to_class_weights, increment_path, labels_to_ima
     strip_optimizer, get_latest_run, check_dataset, check_git_status, check_img_size, check_requirements, \
     check_file, check_yaml, check_suffix, print_mutation, set_logging, one_cycle, colorstr, methods
 from utils.downloads import attempt_download
-from utils.loss import ComputeLoss,ComputeLoss_AnchorFree
+from utils.loss import *
 from utils.plots import plot_labels, plot_evolve
 from utils.torch_utils import EarlyStopping, ModelEMA, de_parallel, intersect_dicts, select_device, \
     torch_distributed_zero_first
@@ -208,7 +208,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
     train_loader, dataset = create_dataloader(train_path, imgsz, batch_size // WORLD_SIZE, gs, single_cls,
                                               hyp=hyp, augment=True, cache=opt.cache, rect=opt.rect, rank=RANK,
                                               workers=workers, image_weights=opt.image_weights, quad=opt.quad,
-                                              prefix=colorstr('train: '))
+                                              prefix=colorstr('train: '), cache_name=opt.cache_name) # 增加cache路劲的名字
 
     mlc = int(np.concatenate(dataset.labels, 0)[:, 0].max())  # max label class
     nb = len(train_loader)  # number of batches
@@ -218,8 +218,8 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
     if RANK in [-1, 0]:
         val_loader = create_dataloader(val_path, imgsz, batch_size // WORLD_SIZE * 2, gs, single_cls,
                                        hyp=hyp, cache=None if noval else opt.cache, rect=True, rank=-1,
-                                       workers=workers, pad=0.5,
-                                       prefix=colorstr('val: '))[0]
+                                       workers=workers, pad=0.0,
+                                       prefix=colorstr('val: '), cache_name=opt.cache_name)[0] # add cache_name
 
         if not resume:
             labels = np.concatenate(dataset.labels, 0)
@@ -238,7 +238,8 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
 
     # DDP mode
     if cuda and RANK != -1:
-        model = DDP(model, device_ids=[LOCAL_RANK], output_device=LOCAL_RANK)
+        # model = DDP(model, device_ids=[LOCAL_RANK], output_device=LOCAL_RANK)
+        model = DDP(model, device_ids=[LOCAL_RANK], output_device=LOCAL_RANK, find_unused_parameters=True) # add
 
     # Model parameters
     hyp['box'] *= 3. / nl  # scale to layers
@@ -256,16 +257,29 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
     # nw = min(nw, (epochs - start_epoch) / 2 * nb)  # limit warmup to < 1/2 of training
     last_opt_step = -1
     maps = np.zeros(nc)  # mAP per class
-    results = (0, 0, 0, 0, 0, 0, 0, 0)  # P, R, mAP@.5, mAP@.5-.95, val_loss(box, obj, cls, angle)
+
     scheduler.last_epoch = start_epoch - 1  # do not move
     scaler = amp.GradScaler(enabled=cuda)
     stopper = EarlyStopping(patience=opt.patience)
-    # compute_loss = ComputeLoss(model)  # init loss class
-    compute_loss = ComputeLoss_AnchorFree(model)  # init loss class
+
+    results = (0, 0, 0, 0, 0, 0, 0, 0)  # P, R, mAP@.5, mAP@.5-.95, val_loss(box, obj, cls, angle)
+
+    # add
+    if opt.anchor_free:
+        # results = (0, 0, 0, 0, 0, 0, 0)  # P, R, mAP@.5, mAP@.5-.95, val_loss(box_angle, obj, cls)
+        # compute_loss = ComputeLoss_AnchorFree_Decoupled(model)  # init loss class
+        compute_loss = ComputeLoss_AnchorFree_Decoupled_CenterPoint(model)  # init loss class
+        # compute_loss = ComputeLoss_AnchorFree(model)  # init loss class
+    else:
+        compute_loss = ComputeLoss(model)  # init loss class
+
     LOGGER.info(f'Image sizes {imgsz} train, {imgsz} val\n'
                 f'Using {train_loader.num_workers} dataloader workers\n'
                 f"Logging results to {colorstr('bold', save_dir)}\n"
                 f'Starting training for {epochs} epochs...')
+
+    # 对训练数据集进行抽样，步进值100为例，然后观察精度与数据规模的变化关系, add
+    # train_loader.sampler.data_source.img_files = train_loader.sampler.data_source.img_files[:1100] # add ,2021年11月5日20:46:56
 
     # epoch ------------------------------------------------------------------
     for epoch in range(start_epoch, epochs):
@@ -281,25 +295,34 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
         # b = int(random.uniform(0.25 * imgsz, 0.75 * imgsz + gs) // gs * gs)
         # dataset.mosaic_border = [b - imgsz, -b]  # height, width borders
 
-        mloss = torch.zeros(4, device=device)  # mean losses
+        # add
+        if opt.anchor_free:
+            mloss = torch.zeros(3, device=device)  # mean losses
+        else:
+            mloss = torch.zeros(4, device=device)  # mean losses, add, anchor free loss
+
+
         if RANK != -1:
             train_loader.sampler.set_epoch(epoch)
-
         if epochs - epoch <=  opt.end_mosaic:
             train_loader.dataset.mosaic = False
             # train_loader.dataset.augment = False
         pbar = enumerate(train_loader)
-
-        LOGGER.info(('\n' + '%10s' * 8) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'angle', 'labels', 'img_size'))
+        # add
+        if opt.anchor_free:
+            LOGGER.info(('\n' + '%10s' * 7) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'labels', 'img_size'))
+        else:
+            LOGGER.info(('\n' + '%10s' * 8) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'angle', 'labels', 'img_size'))
 
         if RANK in [-1, 0]:
             pbar = tqdm(pbar, total=nb)  # progress bar
+
         optimizer.zero_grad()
 
         for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
             ni = i + nb * epoch  # number integrated batches (since train start)
             imgs = imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
-
+            # print("path: %s"%(paths))
             # Warmup
             if ni <= nw:
                 xi = [0, nw]  # x interp
@@ -322,19 +345,23 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
             # Forward
             with amp.autocast(enabled=cuda):
                 pred = model(imgs)  # forward
-                loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+
+                # add,可视化anchor匹配的选项
+                if opt.vis_anchor:
+                    logging.info("vis_anchor %s"%(opt.vis_anchor))
+                    loss, loss_items = compute_loss(pred, targets.to(device), imgs, paths)  # loss scaled by batch_size
+                else:
+                    loss, loss_items = compute_loss(pred, targets.to(device), None, None)  # loss scaled by batch_size
+
                 if RANK != -1:
                     loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
-                if opt.quad:
-                    print("opt.quad: ",opt.quad)
+                if opt.quad: # 矩形框训练
                     loss *= 4.
-
             # Backward
             scaler.scale(loss).backward()
 
             # Optimize
-            # if ni - last_opt_step >= accumulate:
-            if ni % accumulate == 0: # 模型反向传播accumulate次之后再根据累积的梯度更新一次参数
+            if ni - last_opt_step >= accumulate:
                 scaler.step(optimizer)  # optimizer.step
                 scaler.update()
                 optimizer.zero_grad()
@@ -346,8 +373,14 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
             if RANK in [-1, 0]:
                 mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
                 mem = f'{torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0:.3g}G'  # (GB)
-                pbar.set_description(('%10s' * 2 + '%10.4g' * 6) % (
-                    f'{epoch}/{epochs - 1}', mem, *mloss, targets.shape[0], imgs.shape[-1]))
+                # add
+                if opt.anchor_free:
+                    pbar.set_description(('%10s' * 2 + '%10.4g' * 5) % (  # add
+                        f'{epoch}/{epochs - 1}', mem, *mloss, targets.shape[0], imgs.shape[-1]))
+                else:
+                    pbar.set_description(('%10s' * 2 + '%10.4g' * 6) % (
+                        f'{epoch}/{epochs - 1}', mem, *mloss, targets.shape[0], imgs.shape[-1]))
+
                 callbacks.run('on_train_batch_end', ni, model, imgs, targets, paths, plots, opt.sync_bn)
             # end batch ------------------------------------------------------------------------------------------------
 
@@ -361,16 +394,20 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
             ema.update_attr(model, include=['yaml', 'nc', 'hyp', 'names', 'stride', 'class_weights'])
             final_epoch = (epoch + 1 == epochs) or stopper.possible_stop
             if not noval and (epoch+1) % opt.divisor==0 or final_epoch:  # Calculate mAP
+            # if not noval and  final_epoch:  # Calculate mAP
                 results, maps, _ = val.run(data_dict,
+                                           weights=None,
                                            batch_size=batch_size // WORLD_SIZE * 2,
-                                           imgsz=1024,
-                                           iou_thres=0.01,
-                                           model=ema.ema,
+                                           imgsz=640,
+                                           cache_name=opt.cache_name,
+                                           anchor_free = opt.anchor_free,
+                                           iou_thres=0.5,
                                            single_cls=single_cls,
                                            dataloader=val_loader,
                                            save_dir=save_dir,
                                            save_json=is_coco and final_epoch,
                                            verbose=nc < 50 and final_epoch,
+                                           model=ema.ema,
                                            plots=plots and final_epoch,
                                            callbacks=callbacks,
                                            compute_loss=compute_loss)
@@ -381,12 +418,15 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                 best_fitness = fi
                 print("best_fitness:%s"%(best_fitness))
 
-            log_vals = list(mloss) + list(results) + lr
+            # add
+            if opt.anchor_free:
+                log_vals = list(mloss) + list(torch.tensor([0.0])) + list(results) + lr
+            else:
+                log_vals = list(mloss) + list(results) + lr
             callbacks.run('on_fit_epoch_end', log_vals, epoch, best_fitness, fi)
 
             # Save model
-            # if epoch % opt.divisor==0 or (not nosave) or (final_epoch and not evolve) :  # if save
-            if (not nosave) or (final_epoch and not evolve) :  # if save
+            if epoch+1 % opt.divisor==0 or (not nosave) or (final_epoch and not evolve) :  # if save
                 ckpt = {'epoch': epoch,
                         'best_fitness': best_fitness,
                         'model': deepcopy(de_parallel(model)).half(),
@@ -399,7 +439,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                 epoch_path = w / 'epoch_{}.pt'.format(epoch) # 修改
 
                 # Save last, best and delete
-                if (epoch+1) % (opt.divisor*2) == 0:  # 修改
+                if epoch+1 % (opt.divisor * 2 )== 0:  # 修改
                     torch.save(ckpt, epoch_path) # 修改
 
                 elif final_epoch:
@@ -434,7 +474,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                 for m in [last, best] if best.exists() else [last]:  # speed, mAP tests
                     results, _, _ = val.run(data_dict,
                                             batch_size=batch_size // WORLD_SIZE * 2,
-                                            imgsz=1024,
+                                            imgsz=640,
                                             model=attempt_load(m, device).half(),
                                             iou_thres=0.5,  # NMS IoU threshold for best pycocotools results
                                             single_cls=single_cls,
@@ -453,17 +493,46 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
     return results
 
 
+
 def parse_opt(known=False):
     parser = argparse.ArgumentParser()
-    # python -m torch.distributed.launch --nproc_per_node 2 train.py --sync-bn --device 0,1
-    parser.add_argument('--weights', type=str, default='weights/yolov5m.pt', help='initial weights path')
-    parser.add_argument('--cfg', type=str, default='models/yolov5m-anchor-free.yaml', help='model.yaml path')
-    parser.add_argument('--data', type=str, default='data/DOTA_ROTATED.yaml', help='dataset.yaml path')
-    parser.add_argument('--hyp', type=str, default='data/hyps/hyp.finetune.yaml', help='hyperparameters path')
-    parser.add_argument('--epochs', type=int, default=20)
-    parser.add_argument('--batch-size', type=int, default=1, help='total batch size for all GPUs')
+    # python -m torch.distributed.launch --nproc_per_node 2 train.py --sync-bn --device 0,1           # 分布式训练
+
+    parser.add_argument('--anchor-free', type=bool, default=True, help='choose anchor-based or anchor-free') # add
+    # parser.add_argument('--anchor-free', type=bool, default=False, help='choose anchor-based or anchor-free') # add
+    # parser.add_argument('--vis-anchor', type=bool, default=True, help='可视化anchor的匹配过程') # add
+    parser.add_argument('--vis-anchor', type=bool, default=False, help='可视化anchor的匹配过程') # add
+
+    # ----------------------------windows-path--------------------------#
+    # parser.add_argument('--weights', type=str, default=os.path.dirname(os.path.abspath(__file__))+r'\weights\pre-train-model.pt', help='initial weights path')
+    # parser.add_argument('--cfg', type=str, default=os.path.dirname(os.path.abspath(__file__))+r'\models\yolov5m-anchor-free-decoupled.yaml', help='model.yaml path')
+    # parser.add_argument('--cfg', type=str, default=os.path.dirname(os.path.abspath(__file__))+r'\models\yolov5m.yaml', help='model.yaml path')
+    # parser.add_argument('--data', type=str, default=os.path.dirname(os.path.abspath(__file__))+r'\data\DOTA_ROTATED.yaml', help='dataset.yaml path')
+    # parser.add_argument('--hyp', type=str, default=os.path.dirname(os.path.abspath(__file__))+r'\data\hyps\hyp.scratch.yaml', help='hyperparameters path')
+    # parser.add_argument('--hyp', type=str, default=os.path.dirname(os.path.abspath(__file__))+r'\data\hyps\hyp.finetune.windows.yaml', help='hyperparameters path')
+
+    # ----------------------------linux-path--------------------------#
+    parser.add_argument('--weights', type=str,
+                        default=r'/home/fofo/A/xsq/YOLOv5_DOTAv1.5_OBB.pt',
+                        help='initial weights path')
+    parser.add_argument('--cfg', type=str,
+                        default=os.path.dirname(os.path.abspath(__file__)) + '/models/yolov5m-anchor-free-decoupled.yaml',
+                        # default=os.path.dirname(os.path.abspath(__file__)) + '/models/yolov5m.yaml',
+                        help='model.yaml path')
+    parser.add_argument('--data', type=str,
+                        default=os.path.dirname(os.path.abspath(__file__)) + '/data/DOTA_ROTATED.yaml',
+                        help='dataset.yaml path')
+    parser.add_argument('--hyp', type=str,
+                        # default=os.path.dirname(os.path.abspath(__file__)) + '/data/hyps/hyp.scratch.yaml',
+                        # default=os.path.dirname(os.path.abspath(__file__)) + '/data/hyps/hyp.finetune_anchor_free.yaml',
+                        default=os.path.dirname(os.path.abspath(__file__)) + '/data/hyps/hyp.scratch_anchor_free.yaml',
+                        help='hyperparameters path')
+    parser.add_argument('--cache-name', default='mini-dota', help=' 数据集的缓存名字 ')
+
+    parser.add_argument('--epochs', type=int, default=800)
+    parser.add_argument('--batch-size', type=int, default=2, help='total batch size for all GPUs')
     parser.add_argument('--imgsz', '--img', '--img-size', type=int, default=608, help='train, val image size (pixels)')
-    parser.add_argument('--device', default='3', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
+    parser.add_argument('--device', default='2', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     parser.add_argument('--rect', action='store_true', help='rectangular training')
     parser.add_argument('--resume', nargs='?', const=True, default=False, help='resume most recent training')
     parser.add_argument('--nosave', action='store_true', help='only save final checkpoint')
@@ -478,7 +547,7 @@ def parse_opt(known=False):
     parser.add_argument('--adam', action='store_true', help='use torch.optim.Adam() optimizer')
     parser.add_argument('--sync-bn', action='store_true', help='use SyncBatchNorm, only available in DDP mode')
     parser.add_argument('--workers', type=int, default=4, help='maximum number of dataloader workers')
-    parser.add_argument('--project', default='runs/train', help='save to project/name')
+    parser.add_argument('--project', default=os.path.dirname(os.path.abspath(__file__))+r'/runs/train', help='save to project/name')
     parser.add_argument('--entity', default=None, help='W&B entity')
     parser.add_argument('--name', default='exp', help='save to project/name')
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
@@ -495,6 +564,7 @@ def parse_opt(known=False):
     parser.add_argument('--begin_val', type=int, default=10, help='When will validation begin, default No.30 epoch')
     parser.add_argument('--end_mosaic', type=int, default=0, help='When disable mosaic, default last 0 epochs')
     parser.add_argument('--divisor', type=int, default=10, help='when epochs % divisor==0, begin val')
+
     opt = parser.parse_known_args()[0] if known else parser.parse_args()
     return opt
 
@@ -640,6 +710,8 @@ def run(**kwargs):
 if __name__ == "__main__":
     # python -m torch.distributed.launch --nproc_per_node 2 train.py --sync-bn --device 0,1
     opt = parse_opt()
-    opt.name = opt.name + '_' +opt.cfg.split('-')[0]
+    opt.name = opt.name + '-' +opt.cfg.split('.')[0].split('/')[-1]+'-simple'
+
+    # opt.name = opt.name + '_' + 'dcoupled-anchor-based'
 
     main(opt)

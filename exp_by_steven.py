@@ -1,6 +1,9 @@
 import torch
 import numpy as np
 import socket
+import torchvision.models as models
+
+
 
 def torch_test():
     hsize,wsize = 4,4
@@ -59,4 +62,8 @@ def tensor_test():
 
 
 if __name__=='__main__':
-    tensor_test()
+    # Model
+    device = torch.device("cuda")
+    x = torch.randn(1,3,224,224).to(device)
+    x = x.clone().detach()
+    # Inference

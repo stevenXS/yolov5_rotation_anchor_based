@@ -10,7 +10,7 @@
         </fileTransfer>
       </webServer>
       <webServer id="df364e04-7caf-494c-b7a1-2540a6bdef5a" name="bobo-1">
-        <fileTransfer rootFolder="/home/bobo/B/xsq" accessType="SFTP" host="202.115.52.99" port="22" sshConfigId="b11e7df7-2084-41b7-80b5-f599bf688b1c" sshConfig="bobo@202.115.52.99:22 password">
+        <fileTransfer rootFolder="/home/bobo/B/xsq" accessType="SFTP" host="202.115.53.75" port="22" sshConfigId="b11e7df7-2084-41b7-80b5-f599bf688b1c" sshConfig="bobo@202.115.53.75:22 password">
           <advancedOptions>
             <advancedOptions dataProtectionLevel="Private" passiveMode="true" shareSSLContext="true" />
           </advancedOptions>
@@ -18,6 +18,13 @@
       </webServer>
       <webServer id="c4f456b2-b0b6-491c-9518-92cdc093bf3f" name="dio-yolov5-anchor-free">
         <fileTransfer rootFolder="/home/dio/VSST/xsq" accessType="SFTP" host="202.115.53.145" port="22" sshConfigId="814bbfd1-6a42-4aad-9b8a-f77f932dbb8b" sshConfig="dio@202.115.53.145:22 password">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" passiveMode="true" shareSSLContext="true" />
+          </advancedOptions>
+        </fileTransfer>
+      </webServer>
+      <webServer id="e624c85a-81c1-42f0-bb33-a273899be317" name="fofo-v5-anchor-free">
+        <fileTransfer rootFolder="/home/fofo/A/xsq" accessType="SFTP" host="202.115.52.55" port="22" sshConfigId="aedb7977-c13b-4726-9318-8b13f6745465" sshConfig="fofo@202.115.52.55:22 password">
           <advancedOptions>
             <advancedOptions dataProtectionLevel="Private" passiveMode="true" shareSSLContext="true" />
           </advancedOptions>
