@@ -15,7 +15,7 @@ import sys
 import time
 from copy import deepcopy
 from pathlib import Path
-
+from email_result_by_email import SendResultByEmail
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -266,12 +266,12 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
 
     # add
     if opt.anchor_free:
-        # results = (0, 0, 0, 0, 0, 0, 0)  # P, R, mAP@.5, mAP@.5-.95, val_loss(box_angle, obj, cls)
         # compute_loss = ComputeLoss_AnchorFree_Decoupled(model)  # init loss class
         compute_loss = ComputeLoss_AnchorFree_Decoupled_CenterPoint(model)  # init loss class
         # compute_loss = ComputeLoss_AnchorFree(model)  # init loss class
     else:
-        compute_loss = ComputeLoss(model)  # init loss class
+        compute_loss = ComputeLoss_Central_Point(model) # 基于中心点匹配策略的AnchorBased损失，2021年11月27日16:02:22
+        # compute_loss = ComputeLoss(model)  # init loss class
 
     LOGGER.info(f'Image sizes {imgsz} train, {imgsz} val\n'
                 f'Using {train_loader.num_workers} dataloader workers\n'
@@ -416,7 +416,10 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
             fi = fitness(np.array(results).reshape(1, -1))  # weighted combination of [P, R, mAP@.5, mAP@.5-.95]
             if fi > best_fitness:
                 best_fitness = fi
-                print("best_fitness:%s"%(best_fitness))
+                # 发送邮件
+                if results[2] > 0.5: # add
+                    send_msg = 'mp: %.4f, mr: %.4f, map50: %.4f, map: %.4f' % (results[0], results[1], results[2], results[3])
+                    SendResultByEmail(receiver='x1165160978@163.com', title='DOTA-数据集测试结果',content='<br> %s </br>' % (send_msg)).send()  # 发送邮件测试，add
 
             # add
             if opt.anchor_free:
@@ -424,9 +427,9 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
             else:
                 log_vals = list(mloss) + list(results) + lr
             callbacks.run('on_fit_epoch_end', log_vals, epoch, best_fitness, fi)
-
+            epoch = epoch + 1
             # Save model
-            if epoch+1 % opt.divisor==0 or (not nosave) or (final_epoch and not evolve) :  # if save
+            if epoch % opt.divisor==0 or (not nosave) or (final_epoch and not evolve) :  # if save
                 ckpt = {'epoch': epoch,
                         'best_fitness': best_fitness,
                         'model': deepcopy(de_parallel(model)).half(),
@@ -439,12 +442,10 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                 epoch_path = w / 'epoch_{}.pt'.format(epoch) # 修改
 
                 # Save last, best and delete
-                if epoch+1 % (opt.divisor * 2 )== 0:  # 修改
+                if epoch % (opt.divisor)== 0:  # 修改
                     torch.save(ckpt, epoch_path) # 修改
-
-                elif final_epoch:
+                if epoch % (opt.divisor)== 0:
                     torch.save(ckpt, last)
-
                 if best_fitness == fi:
                     torch.save(ckpt, best)
 
@@ -498,8 +499,8 @@ def parse_opt(known=False):
     parser = argparse.ArgumentParser()
     # python -m torch.distributed.launch --nproc_per_node 2 train.py --sync-bn --device 0,1           # 分布式训练
 
-    parser.add_argument('--anchor-free', type=bool, default=True, help='choose anchor-based or anchor-free') # add
-    # parser.add_argument('--anchor-free', type=bool, default=False, help='choose anchor-based or anchor-free') # add
+    # parser.add_argument('--anchor-free', type=bool, default=True, help='choose anchor-based or anchor-free')
+    parser.add_argument('--anchor-free', type=bool, default=False, help='choose anchor-based or anchor-free')
     # parser.add_argument('--vis-anchor', type=bool, default=True, help='可视化anchor的匹配过程') # add
     parser.add_argument('--vis-anchor', type=bool, default=False, help='可视化anchor的匹配过程') # add
 
@@ -513,26 +514,36 @@ def parse_opt(known=False):
 
     # ----------------------------linux-path--------------------------#
     parser.add_argument('--weights', type=str,
-                        default=r'/home/fofo/A/xsq/YOLOv5_DOTAv1.5_OBB.pt',
+                        default=r'/home/fofo/A/xsq/yolov5_rotation_anchore_free_decoupled_centernet/runs/train/exp-yolov5m-anchor-based-center-improve8/weights/last.pt',
                         help='initial weights path')
+
     parser.add_argument('--cfg', type=str,
-                        default=os.path.dirname(os.path.abspath(__file__)) + '/models/yolov5m-anchor-free-decoupled.yaml',
+                        # default=os.path.dirname(os.path.abspath(__file__)) + '/models/yolov5m-anchor-free-decoupled.yaml',
+                        default=os.path.dirname(os.path.abspath(__file__)) + '/models/yolov5m-anchor-based-center.yaml',
                         # default=os.path.dirname(os.path.abspath(__file__)) + '/models/yolov5m.yaml',
                         help='model.yaml path')
+
     parser.add_argument('--data', type=str,
                         default=os.path.dirname(os.path.abspath(__file__)) + '/data/DOTA_ROTATED.yaml',
+                        # default=os.path.dirname(os.path.abspath(__file__)) + '/data/DOTA_ROTATED_debug.yaml',
                         help='dataset.yaml path')
-    parser.add_argument('--hyp', type=str,
-                        # default=os.path.dirname(os.path.abspath(__file__)) + '/data/hyps/hyp.scratch.yaml',
-                        # default=os.path.dirname(os.path.abspath(__file__)) + '/data/hyps/hyp.finetune_anchor_free.yaml',
-                        default=os.path.dirname(os.path.abspath(__file__)) + '/data/hyps/hyp.scratch_anchor_free.yaml',
-                        help='hyperparameters path')
-    parser.add_argument('--cache-name', default='mini-dota', help=' 数据集的缓存名字 ')
+    # parser.add_argument('--cache-name', default='debug-dota', help=' 数据集的缓存名字 ')
+    parser.add_argument('--cache-name', default='src-dota', help=' 数据集的缓存名字 ')
 
-    parser.add_argument('--epochs', type=int, default=800)
-    parser.add_argument('--batch-size', type=int, default=2, help='total batch size for all GPUs')
-    parser.add_argument('--imgsz', '--img', '--img-size', type=int, default=608, help='train, val image size (pixels)')
+    parser.add_argument('--hyp', type=str,
+                        default=os.path.dirname(os.path.abspath(__file__)) + '/data/hyps/hyp.scratch.yaml',
+                        # default=os.path.dirname(os.path.abspath(__file__)) + '/data/hyps/hyp.finetune.yaml',
+                        # default=os.path.dirname(os.path.abspath(__file__)) + '/data/hyps/hyp.finetune_anchor_free.yaml',
+                        # default=os.path.dirname(os.path.abspath(__file__)) + '/data/hyps/hyp.scratch_anchor_free.yaml',
+                        help='hyperparameters path')
+
+    parser.add_argument('--epochs', type=int, default=32)
+    parser.add_argument('--batch-size', type=int, default=12, help='total batch size for all GPUs')
+    parser.add_argument('--imgsz', '--img', '--img-size', type=int, default=800, help='train, val image size (pixels)')
     parser.add_argument('--device', default='2', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
+    parser.add_argument('--divisor', type=int, default=1, help='when epochs % divisor==0, begin val')
+    parser.add_argument('--workers', type=int, default=4, help='maximum number of dataloader workers')
+
     parser.add_argument('--rect', action='store_true', help='rectangular training')
     parser.add_argument('--resume', nargs='?', const=True, default=False, help='resume most recent training')
     parser.add_argument('--nosave', action='store_true', help='only save final checkpoint')
@@ -546,7 +557,6 @@ def parse_opt(known=False):
     parser.add_argument('--single-cls', action='store_true', help='train multi-class data as single-class')
     parser.add_argument('--adam', action='store_true', help='use torch.optim.Adam() optimizer')
     parser.add_argument('--sync-bn', action='store_true', help='use SyncBatchNorm, only available in DDP mode')
-    parser.add_argument('--workers', type=int, default=4, help='maximum number of dataloader workers')
     parser.add_argument('--project', default=os.path.dirname(os.path.abspath(__file__))+r'/runs/train', help='save to project/name')
     parser.add_argument('--entity', default=None, help='W&B entity')
     parser.add_argument('--name', default='exp', help='save to project/name')
@@ -563,7 +573,7 @@ def parse_opt(known=False):
     parser.add_argument('--patience', type=int, default=100, help='Early Stopping patience (epochs without improvement)')
     parser.add_argument('--begin_val', type=int, default=10, help='When will validation begin, default No.30 epoch')
     parser.add_argument('--end_mosaic', type=int, default=0, help='When disable mosaic, default last 0 epochs')
-    parser.add_argument('--divisor', type=int, default=10, help='when epochs % divisor==0, begin val')
+
 
     opt = parser.parse_known_args()[0] if known else parser.parse_args()
     return opt
@@ -710,7 +720,7 @@ def run(**kwargs):
 if __name__ == "__main__":
     # python -m torch.distributed.launch --nproc_per_node 2 train.py --sync-bn --device 0,1
     opt = parse_opt()
-    opt.name = opt.name + '-' +opt.cfg.split('.')[0].split('/')[-1]+'-simple'
+    opt.name = opt.name + '-' +opt.cfg.split('.')[0].split('/')[-1]+'-improve'
 
     # opt.name = opt.name + '_' + 'dcoupled-anchor-based'
 

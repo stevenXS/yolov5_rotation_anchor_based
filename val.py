@@ -17,6 +17,7 @@ import numpy as np
 import torch
 import cv2
 from tqdm import tqdm
+from email_result_by_email import SendResultByEmail
 
 FILE = Path(__file__).absolute()
 sys.path.append(FILE.parents[0].as_posix())  # add yolov5/ to path
@@ -122,6 +123,7 @@ def run(data,
         batch_size=32,  # batch size
         imgsz=640,  # inference size (pixels)
         anchor_free = False,
+        cache_name = None,
         conf_thres=0.25,  # confidence threshold
         iou_thres=0.6,  # NMS IoU threshold
         task='val',  # train, val, test, speed or study
@@ -194,7 +196,7 @@ def run(data,
         # def create_dataloader(path, imgsz, batch_size, stride, single_cls=True, hyp=None, augment=False, cache=False, pad=0.0,
         #                       rect=False, rank=-1, workers=8, image_weights=False, quad=False, prefix=''):
         dataloader = create_dataloader(data[task], imgsz, batch_size, gs, single_cls, pad=0.0, rect=True,
-                                       prefix=colorstr(f'{task}: '))[0]
+                                       prefix=colorstr(f'{task}: '),cache_name=cache_name)[0]
 
     seen = 0
     confusion_matrix = ConfusionMatrix(nc=nc)
@@ -376,11 +378,14 @@ def run(data,
 def parse_opt():
     parser = argparse.ArgumentParser(prog='val.py')
     parser.add_argument('--data', type=str, default='data/DOTA_ROTATED.yaml', help='dataset.yaml path')
-    parser.add_argument('--weights', nargs='+', type=str, default='/home/fofo/A/xsq/yolo_pretrained_weights/yolov5m_asff_subpixle_tr.pt', help='model.pt path(s)')
-    parser.add_argument('--batch-size', type=int, default=4, help='batch size')
+    # parser.add_argument('--data', type=str, default='data/DOTA_ROTATED_debug.yaml', help='dataset.yaml path')
+    # parser.add_argument('--weights', nargs='+', type=str, default='/home/fofo/A/xsq/yolo_pretrained_weights/YOLOv5_DOTAv1.5_OBB.pt', help='model.pt path(s)')
+    parser.add_argument('--weights', nargs='+', type=str, default='/home/fofo/A/xsq/yolov5_rotation_anchore_free_decoupled_centernet/runs/train/exp-yolov5m-anchor-based-center-improve/weights/best.pt', help='model.pt path(s)')
+    parser.add_argument('--batch-size', type=int, default=8, help='batch size')
     parser.add_argument('--imgsz', '--img', '--img-size', type=int, default=800, help='inference size (pixels)')
     # parser.add_argument('--hyp', type=str, default='data/hyps/hyp.scratch.yaml', help='hyperparameters path')
-    parser.add_argument('--conf-thres', type=float, default=0.1, help='confidence threshold')
+    parser.add_argument('--cache-name', default='debug-dota', help=' 数据集的缓存名字 ')
+    parser.add_argument('--conf-thres', type=float, default=0.2, help='confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.5, help='NMS IoU threshold')
     parser.add_argument('--task', default='val', help='train, val, test, speed or study')
     parser.add_argument('--device', default='2', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
@@ -408,8 +413,12 @@ def main(opt):
     check_requirements(requirements=FILE.parent / 'requirements.txt', exclude=('tensorboard', 'thop'))
 
     if opt.task in ('train', 'val', 'test'):  # run normally
-        run(**vars(opt))
-
+        # run(**vars(opt))
+        results, maps, _ = run(**vars(opt))
+        if results[2] > 0.5:
+        #     # --------------------------------------------- #
+            send_msg = 'mp: %.4f, mr: %.4f, map50: %.4f, map: %.4f' % (results[0],results[1],results[2],results[3])
+            SendResultByEmail(receiver='steven@stu.scu.edu.cn', title='DOTA-数据集测试结果',content='<br> 评估：%s </br>' % (send_msg)).send()  # 发送邮件测试，add
     elif opt.task == 'speed':  # speed benchmarks
         for w in opt.weights if isinstance(opt.weights, list) else [opt.weights]:
             run(opt.data, weights=w, batch_size=opt.batch_size, imgsz=opt.imgsz, conf_thres=.25, iou_thres=.45,

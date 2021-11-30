@@ -457,95 +457,41 @@ class ASFF_Detect(nn.Module):   #add ASFFV5 layer and Rfb
 
 
 '''
-基于FCOS的检测头，2021年11月21日14:53:47
+基于中心点筛选的检测头-AnchorBased，2021年11月21日14:53:47
 '''
-class Detect_AnchorFree_FCOS(nn.Module):
-    def __init__(self, nc=16, anchors=(), ch=(), inplace=True):  # detection layer
-        super().__init__()
+class Detect_Center_Head(nn.Module):
+    stride = None  # strides computed during build
+    onnx_dynamic = False  # ONNX export parameter
 
+    def __init__(self, nc=80, anchors=(), ch=(), inplace=True):  # detection layer
+        super().__init__()
         self.nc = nc  # number of classes
-        self.no = nc + 4 + 1 + 1 # number of outputs per anchor,[t,l,r,b,ness,angle]
+        # TODO:增加中心度预测层 中心度预测与分类预测在一个分支，由分类部分的四个卷积层输出的特征再经过一个卷积层输出一个对应的分数
+        self.no = nc + 5 + 180  # number of outputs per anchor, 1 mean angle classifications.
         self.nl = len(anchors)  # number of detection layers
         self.na = len(anchors[0]) // 2  # number of anchors
-        self.grid = [torch.zeros(1)] * self.nl  # 初始化网格
+        self.grid = [torch.zeros(1)] * self.nl  # init grid
         a = torch.tensor(anchors).float().view(self.nl, -1, 2)
         self.register_buffer('anchors', a)  # shape(nl,na,2)
         self.register_buffer('anchor_grid', a.clone().view(self.nl, 1, -1, 1, 1, 2))  # shape(nl,1,na,1,1,2)
-        # 将此卷积进行解耦操作，其他不变
+        self.m = nn.ModuleList(nn.Conv2d(x, self.no * self.na, 1) for x in ch)  # output conv
+        # TODO：增加中心度预测分支，现在单独将其解耦出来进行预测，FCOS是将“中心度”和“分类”分支进行一起训练
 
         self.inplace = inplace  # use in-place ops (e.g. slice assignment)
-        # 对【self.m = nn.ModuleList(nn.Conv2d(x, self.no * self.na, 1) for x in ch)】”分类“和”回归“任务进行解耦
-        self.cls_conv = nn.ModuleList()  # 分类卷积
-        self.reg_conv = nn.ModuleList()  # 回归卷积
-
-        self.act = 'relu'  # 激活函数形式
-        self.cls_pred = nn.ModuleList()  # 一个1x1的卷积，把通道数变成类别数，比如coco 16类
-        self.center_ness = nn.ModuleList()  # 中心度预测，不使用obj区分前景或背景
-
-        self.reg_pred = nn.ModuleList()  # 一个1x1的卷积，把通道数变成4通道， t,l,r,b.
-        self.angle_preds = nn.ModuleList()  # angle，预测一个通道
-
-        # 3种不同尺度的输出进行初始化卷积
-        # 同时生成grid，为build_target_anchor_free处理正样本anchor做准备
-        for i in range(len(ch)):
-
-            # 构建分类和回归任务的3*3卷积，这里只使用一层BaseConv，考虑复杂度的问题
-            self.cls_conv.append(nn.Sequential(*[
-                BaseConv(in_channels=(int(ch[i])), out_channels=int(ch[i]), ksize=3, stride=1, act=self.act)
-            ]))
-
-            self.reg_conv.append(nn.Sequential(*[
-                BaseConv(in_channels=(int(ch[i])), out_channels=int(ch[i]), ksize=3, stride=1, act=self.act)
-            ]))
-
-            # 构建预测的卷积
-            self.cls_pred.append(
-                nn.Conv2d(in_channels=int(ch[i]), out_channels=self.nc * self.na, kernel_size=1, stride=1)
-            )
-            self.center_ness.append(
-                nn.Conv2d(in_channels=int(ch[i]), out_channels=1 * self.na, kernel_size=1, stride=1)
-            )  # 最后输出一个分数，他与class是一个分支
-
-            self.reg_pred.append(
-                nn.Conv2d(in_channels=int(ch[i]), out_channels=4 * self.na, kernel_size=1, stride=1)
-            )
-            self.angle_preds.append(
-                nn.Conv2d(in_channels=int(ch[i]), out_channels=180 * self.na, kernel_size=1, stride=1)
-            )
 
     def forward(self, x):
         z = []  # inference output
 
-        for i, (cls_conv, reg_conv, xi) in enumerate(
-                zip(self.cls_conv, self.reg_conv, x)):
-
-            # 分别进行解耦卷积
-            cls_x = xi
-            reg_x = xi
-
-            # 分类的输出
-            cls_feat = cls_conv(cls_x)
-            cls_output = self.cls_pred[i](cls_feat)
-
-            # 回归的输出
-            reg_feat = cls_conv(reg_x)
-            reg_output = self.reg_pred[i](reg_feat)  # 坐标的输出
-            obj_output = self.obj_pred[i](reg_feat)  # obj的输出
-
-            # 角度的输出
-            angle_output = self.angle_preds[i](reg_feat)  # 角度的输出同样用到回归的数据
-
-            # 对每一层的结果进行拼接
-            x[i] = torch.cat([reg_output, angle_output, obj_output, cls_output], 1)
-            # print(x[i].shape)
-
-            bs, _, ny, nx = x[i].shape  # x[i]:(batch_size, (5+nc) * na, size1', size2')
-
-            # 不进行特征图合并，保持与Detect一致
+        # self.training = False
+        for i in range(self.nl):
+            x[i] = self.m[i](x[i])  # conv
+            bs, _, ny, nx = x[i].shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
             x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
-            # x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).reshape(
-            #     bs, self.na * ny * nx, -1
-            # )
+
+            # 构建grid
+            if self.grid[i].shape[2:4] != x[i].shape[2:4]:
+                grid = self._make_grid(nx, ny).to(x[i].device)
+                self.grid[i] = grid.view(1, -1, 2)  # size=(1,h_size*w_size,2)
 
             if not self.training:  # inference
                 if self.grid[i].shape[2:4] != x[i].shape[2:4] or self.onnx_dynamic:
@@ -568,6 +514,7 @@ class Detect_AnchorFree_FCOS(nn.Module):
         yv, xv = torch.meshgrid([torch.arange(ny), torch.arange(nx)])
         return torch.stack((xv, yv), 2).view((1, 1, ny, nx, 2)).float()
 
+#--------------------------------------------------#
 class Model(nn.Module):
     def __init__(self, cfg='yolov5s.yaml', ch=3, nc=None, anchors=None):  # model, input channels, number of classes
         super().__init__()
@@ -607,7 +554,17 @@ class Model(nn.Module):
             check_anchor_order(m)
             self.stride = m.stride
             self._initialize_biases()  # only run once
-            print('Strides: %s' % m.stride.tolist())
+            logging.info('Strides: %s' % m.stride.tolist())
+        # add
+        elif isinstance(m, Detect_Center_Head):
+            s = 256  # 2x min stride
+            m.inplace = self.inplace
+            m.stride = torch.tensor([s / x.shape[-2] for x in self.forward(torch.zeros(1, ch, s, s))])  # forward
+            m.anchors /= m.stride.view(-1, 1, 1)
+            check_anchor_order(m)
+            self.stride = m.stride
+            self._initialize_biases()  # only run once
+            logging.info('Strides: %s' % m.stride.tolist())
         # add
         elif isinstance(m, ASFF_Detect):
             s = 256  # 2x min stride
@@ -856,7 +813,11 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
             args.append([ch[x] for x in f])
             if isinstance(args[1], int):  # number of anchors
                 args[1] = [list(range(args[1] * 2))] * len(f)
-
+        # add
+        elif m is Detect_Center_Head:
+            args.append([ch[x] for x in f])
+            if isinstance(args[1], int):  # number of anchors
+                args[1] = [list(range(args[1] * 2))] * len(f)
         # 增加ASFF的检测头,2021年11月1日10:46:01
         elif m is ASFF_Detect:
             args.append([ch[x] for x in f])
@@ -904,9 +865,9 @@ if __name__ == '__main__':
         yolov5m-asff: 10948910
     """
     parser = argparse.ArgumentParser()
-    parser.add_argument('--cfg', type=str, default='yolov5m-dcoupled-head.yaml', help='model.yaml')
+    # parser.add_argument('--cfg', type=str, default='yolov5m-dcoupled-head.yaml', help='model.yaml')
     # parser.add_argument('--cfg', type=str, default='yolov5m-anchor-free-decoupled.yaml', help='model.yaml')
-    # parser.add_argument('--cfg', type=str, default='yolov5m.yaml', help='model.yaml')
+    parser.add_argument('--cfg', type=str, default='yolov5m.yaml', help='model.yaml')
     parser.add_argument('--device', default='0', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     parser.add_argument('--profile', action='store_true', help='profile model speed')
     opt = parser.parse_args()

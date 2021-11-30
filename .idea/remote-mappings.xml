@@ -10,6 +10,13 @@
             </list>
           </settings>
         </remote-mappings>
+        <remote-mappings server-id="python@sftp://fofo@202.115.52.55:22/home/fofo/anaconda3/envs/rotate/bin/python3.6">
+          <settings>
+            <list>
+              <mapping local-root="$PROJECT_DIR$" remote-root="/home/fofo/A/xsq/yolov5_rotation_anchore_free_decoupled_centernet" />
+            </list>
+          </settings>
+        </remote-mappings>
       </list>
     </list>
   </component>

@@ -229,6 +229,12 @@ class ComputeLoss:
                 # Classification
                 if self.nc > 1:  # cls loss (only if multiple classes)
                     t = torch.full_like(ps[:, 5:self.class_index], self.cn, device=device)  # targets
+                    '''
+                    1. tcls.shape = list[3],eg: list[0].shape = (117,)
+                    2. range(n)就相当于遍历矩阵t的每一行，然后通过索引i取出当前特征图上匹配到的正样本的类别，即tcls[i]
+                    3. t[range(n), tcls[i]] = t[0,[...]] = 1,...,t[116, [...]] = 1
+                        eg: t[0,[0,1,2,5] = 1表示第0行的第0,1,2,5位置的元素为1，如果第二个维度有多个重复数字则只记录一次1
+                    '''
                     t[range(n), tcls[i]] = self.cp # 被匹配到的类别就置为1
                     lcls += self.BCEcls(ps[:, 5:self.class_index], t)  # BCE
                 
@@ -360,7 +366,7 @@ class ComputeLoss:
                 j = torch.max(r, 1. / r).max(2)[0] < self.hyp['anchor_t']
                 # j = wh_iou(anchors, t[:, 4:6]) > model.hyp['iou_t']  # iou(3,n)=wh_iou(anchors(3,2), gwh(n,2))
                 t = t[j]  # 进行过滤
-
+                logging.info("匹配到的正样本的数量："+ str(t.shape[0]))
                 # Offsets
                 # 以图像左上角为原点，gxy为标签值的x,y坐标
                 # 然后转化为以特征图右下角为原点，即target[x,y] -> (80-x, 80-y)
@@ -404,19 +410,28 @@ class ComputeLoss:
             txywh.append(torch.cat((gxy,gwh),1)) # 可视化增加xy,wh
         return tcls, tangle, tbox, indices, anch , txywh
 
-
-class ComputeLoss_AnchorFree:
-    # Compute losses
-    def __init__(self, model, autobalance=False):
+# TODO 修改筛选策略,基于中心点的筛选策略
+class ComputeLoss_Central_Point:
+    '''
+    基于中心点采样的AnchorBased损失函数
+    '''
+    def __init__(self, model, autobalance=False, hyp=None): # add hyp for debug
         self.sort_obj_iou = False
         device = next(model.parameters()).device  # get model device
+
         h = model.hyp  # hyperparameters
+        # h = hyp  # add for debug
+
+        self.model = model
+
         self.class_index = 5 + model.nc
+        # self.class_index = 5 + 16 # add for debug
 
         # Define criteria
         BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['cls_pw']], device=device))
         BCEobj = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['obj_pw']], device=device))
         BCEangle = nn.BCEWithLogitsLoss(pos_weight=torch.Tensor([h['angle_pw']])).to(device)
+        BCEcenterness = nn.BCEWithLogitsLoss() # add,中心度计算损失
 
         # Class label smoothing https://arxiv.org/pdf/1902.04103.pdf eqn 3
         self.cp, self.cn = smooth_BCE(eps=h.get('label_smoothing', 0.0))  # positive, negative BCE targets
@@ -433,16 +448,20 @@ class ComputeLoss_AnchorFree:
         self.ssi = list(det.stride).index(16) if autobalance else 0  # stride 16 index
         self.BCEcls, self.BCEobj, self.gr, self.hyp, self.autobalance = BCEcls, BCEobj, 1.0, h, autobalance
         self.BCEangle = BCEangle
+        self.BCEcenterness = BCEcenterness # add
 
         for k in 'na', 'nc', 'nl', 'anchors':
             setattr(self, k, getattr(det, k))
 
-    def __call__(self, p, targets):  # predictions, targets, model
+    def __call__(self, p, targets, imgs=None, img_path=None):  # predictions, targets, model
+        '''
+        @param imgs: 可视化参数
+        @param img_path: 可视化参数
+        '''
         device = targets.device
         lcls, lbox, lobj = torch.zeros(1, device=device), torch.zeros(1, device=device), torch.zeros(1, device=device)
         langle = torch.zeros(1, device=device)
 
-        # build_targets函数返回的结果应该是正样本
         '''
         tcls : 3个tensor组成的list (tensor_class_list[i])  对每个步长网络生成对应的class tensor tcls[i].shape=(num_i, 1)
             eg：tcls[0] = tensor([73, 73, 73])
@@ -461,7 +480,8 @@ class ComputeLoss_AnchorFree:
             tangle[i].shape=(num_i, 1)
             eg：tangle[0] = tensor([179, 179, 179])
         '''
-        tcls, tangle, tbox, indices, anchors = self.build_targets(p, targets)  # targets
+        # tcls, tangle, tbox, indices, anchors = self.build_targets(p, targets)  # targets
+        tcls, tangle, tbox, indices, anchors, tcoordinate = self.build_targets(p, targets)  # targets, add
 
         # 可视化target，2021-10-18 14:28:36
         # vis_bbox(p,targets)
@@ -493,6 +513,14 @@ class ComputeLoss_AnchorFree:
 
                 # 使用到了CIou loss
                 iou = bbox_iou(pbox.T, tbox[i], x1y1x2y2=False, CIoU=True)  # iou(prediction, target)
+
+                # TODO：添加中心度计算，为远离GT的anchor做惩罚
+                # ---------------------------------------------------------- #
+                # if tcoordinate[i] is not None and tcoordinate[i].sum() > 0:
+                #     iou = iou * self.get_centerness_targets(tcoordinate[i])
+
+                # ---------------------------------------------------------- #
+
                 lbox += (1.0 - iou).mean()  # iou loss
 
                 # Objectness
@@ -544,7 +572,7 @@ class ComputeLoss_AnchorFree:
     '''
         预测的anchor与真实标签做对比，进行筛选
     '''
-
+    @torch.no_grad()
     def build_targets(self, p, targets):
         '''
         @param p: list: [small_forward, medium_forward, large_forward]
@@ -576,6 +604,8 @@ class ComputeLoss_AnchorFree:
         na, nt = self.na, targets.shape[0]  # 预测框的种类, 标签值的数量
         tcls, tbox, indices, anch = [], [], [], []
         tangle = []
+        tcoordinate = [] # 获取筛选后的正样本的l,t,r,b
+
         gain = torch.ones(8, device=targets.device)  # normalized to grid space gain
 
         '''
@@ -591,8 +621,9 @@ class ComputeLoss_AnchorFree:
         2.targets.repeat(na, 1, 1): target一共两个维度(number_of_targets，[image,class,x,y,w,h])进行维度扩展，假如na=3，那么扩展后的维度
             targets.repeat(na, 1, 1)=(na, nt, [image,class,x,y,w,h])
         3.再将两个三维矩阵在第2个维度进行进行拼接，即(na, nt, 1+6)
-        eg: 目的是为了将预测框和标签值进行矩阵拼接，接下来进行筛选策略。
-        4.targets此时的size = (num_anchor, num_gt, [img_id, cls_id, x,y,w,h,theta, anchor_index])
+            eg: 目的是为了将预测框和标签值进行矩阵拼接，接下来进行筛选策略。
+        4.targets此时的size = (kinds_of_anchors, num_gt, [img_id, cls_id, x,y,w,h,theta, anchor_index])
+            eg:意味着“每一种anchor”对应着num_gt个标签值
         '''
         targets = torch.cat((targets.repeat(na, 1, 1), ai[:, :, None]), 2)  # append anchor indices
 
@@ -622,6 +653,7 @@ class ComputeLoss_AnchorFree:
             # Match targets to anchors
             # targets已经被归一化处理，然后通过gain矩阵中获取的特征图大小进行映射，投影到特征图上去
             t = targets * gain
+            t = t.unsqueeze(-2).repeat(1, 1, p[i].shape[2] * p[i].shape[3], 1) # 将t进行维度扩充t[kinds_of_anchors, num_gt, 8] -> [kinds_of_anchors, num_gt, feature_size1*feature_size2, 8]
 
             if nt:  # 标签数量
                 # 匹配策略
@@ -630,34 +662,48 @@ class ComputeLoss_AnchorFree:
                 # anchors[:, None]: 扩张第二个维度，（3,2）->(3,1,2)
                 # r: 获得宽高比
                 '''
-                r = t[:, :, 4:6] / anchors[:, None]  # wh ratio
+                # r = t[:, :, 4:6] / anchors[:, None]  # wh ratio
 
-                # 如果每个标签值和anchor的wh比最大值小于超参数里面的预设值，则该anchor为合适的anchor
-                j = torch.max(r, 1. / r).max(2)[0] < self.hyp['anchor_t']
+                # j = torch.max(r, 1. / r).max(2)[0] < self.hyp['anchor_t'] # 如果每个标签值和anchor的wh比最大值小于超参数里面的预设值，则该anchor为合适的anchor
+
+                '''
+                    不采用shape的采样策略，采用中心点筛选策略;
+                    return j: 返回一个mask,shape=[kinds_of_anchors, num_gt, feature_size1*feature_size2]
+                '''
+
+                j = self.get_anchor_mask(p[i], t, num_gt=nt,layer_index=i)
                 # j = wh_iou(anchors, t[:, 4:6]) > model.hyp['iou_t']  # iou(3,n)=wh_iou(anchors(3,2), gwh(n,2))
+
                 t = t[j]  # 进行过滤
 
+                # logging.info("被筛选出的正样本数量："+ str(t.shape[0]))
                 # Offsets
                 # 以图像左上角为原点，gxy为标签值的x,y坐标
                 # 然后转化为以特征图右下角为原点，即target[x,y] -> (80-x, 80-y)
-                gxy = t[:, 2:4]  # grid xy
-                gxi = gain[[2, 3]] - gxy  # inverse
-
-                # gxi：转换后的标签的xy坐标（右下角为原点），gxy: 真实标签的xy左边（左上角为原点）
+                # gxy = t[:, 2:4]  # grid xy
+                # gxi = gain[[2, 3]] - gxy  # inverse
+                '''
+                这部分操作是v5中扩充正样本的手段，把每个匹配到的anchor的左上方两个点扩充，或者右下方两个点扩充
+                '''
+                # gxy: 真实标签的xy左边（左上角为原点），gxi：转换后的标签的xy坐标（右下角为原点）
                 # j,l矩阵互斥，k,m矩阵互斥
-                j, k = ((gxy % 1. < g) & (gxy > 1.)).T  # 判断转换前的x，y是否大于1，并且x距它左边,y距它上边的网格距离是否<0.5?如果都满足条件，则选中
-                l, m = ((gxi % 1. < g) & (gxi > 1.)).T  # 同理对转换后的坐标判断x距它网格的右边，y距它网格下边是否同时满足上述两个条件。
+                # j, k = ((gxy % 1. < g) & (gxy > 1.)).T  # 判断转换前的x，y是否大于1，并且x距它左边,y距它上边的网格距离是否<0.5?如果都满足条件，则选中
+                # l, m = ((gxi % 1. < g) & (gxi > 1.)).T  # 同理对转换后的坐标判断x距它网格的右边，y距它网格下边是否同时满足上述两个条件。
 
                 # 然后j是一个bool变量的矩阵，size=（5，标签的数量）,假设(5,15)
-                # 然后将这几个矩阵进行连接起来
-                j = torch.stack((torch.ones_like(j), j, k, l, m))
+                # 然后将这几个矩阵进行连接起来，默认第0个维度进行拼接
+                # j = torch.stack((torch.ones_like(j), j, k, l, m))
+
+
 
                 # t.repeat((5, 1, 1))：在（15,8）第0维前重复5次->(5,15,8)
                 # 这里获取已经匹配到了的anchor
-                t = t.repeat((5, 1, 1))[j]  # 过滤后，t剩下两个维度，[select_anchors, 8], 即筛选出来的anchor
+                # t = t.repeat((5, 1, 1))[j]  # 过滤后，t剩下两个维度，[select_anchors, 8], 即筛选出来的anchor
 
-                # 获取所有标签值的偏置
-                offsets = (torch.zeros_like(gxy)[None] + off[:, None])[j]
+                # 获取所有被匹配到的正样本的偏移量
+                # offsets = (torch.zeros_like(gxy)[None] + off[:, None])[j]
+                offsets = 0
+                # del j # 删除临时变量，避免显存爆炸
             else:
                 t = targets[0]
                 offsets = 0
@@ -667,7 +713,7 @@ class ComputeLoss_AnchorFree:
             angle = t[:, 6].long()  # 获取角度索引，第6个维度
             gxy = t[:, 2:4]  # grid xy
             gwh = t[:, 4:6]  # grid wh
-            gij = (gxy - offsets).long()  # 获取每个box所在网格点的坐标
+            gij = (gxy - offsets).long()  # 让每个正样本的格点偏移0.5个像素
             gi, gj = gij.T  # grid xy indices
 
             # Append
@@ -677,8 +723,110 @@ class ComputeLoss_AnchorFree:
             anch.append(anchors[a])  # anchors
             tcls.append(c)  # class
             tangle.append(angle)  # angle
+            tcoordinate.append(self.get_coordinate(t)) # 获取筛选出来的正样本的l,r,t,b,进行中心度计算
+            # del angle,gxy,gij,gi,gj  # 释放显存，add
 
-        return tcls, tangle, tbox, indices, anch
+        return tcls, tangle, tbox, indices, anch , tcoordinate
+    @torch.no_grad()
+    def get_anchor_mask(self, pi, t, num_gt, layer_index):
+            '''
+            @param pi: 传入的是batch中某一个的特征图，size = (1种scale框 * size1 * size2, [x,y,w,h,theta,obj,classes])
+                eg: 将检测头的每一层输出的特征图w，h进行合并
+            @param targets: 当前batch中某一个image的targets，shape=(kinds_of_anchors, num_gt, feature_size1*feature_size2, [class,x,y,w,h,theta])
+            '''
+
+            strides = [8, 16, 32]  # 三层layer的采样率
+            kinds_of_anchors = self.na  # 预测框的种类
+
+            # 特征图大小
+            total_num_anchors = pi.shape[2] * pi.shape[3]
+
+            # 获取grid的x,y坐标
+            if RANK != -1:  # DDP
+                x_shifts = self.model.module.model[-1].grid[layer_index][:, :, 0]
+                y_shifts = self.model.module.model[-1].grid[layer_index][:, :, 1]
+            else:
+                x_shifts = self.model.model[-1].grid[layer_index][:, :, 0].type_as(pi[0])  # shape = (1, size1*size2)
+                y_shifts = self.model.model[-1].grid[layer_index][:, :, 1].type_as(pi[0])
+
+            # exp_stride: 保存每一层的采样间隔，size=(1, grid.shape[1])
+            exp_strides = torch.zeros(1, total_num_anchors).fill_(strides[layer_index]).type_as(pi[0])
+
+            # 获取每个特征图的x,y格点坐标
+            # x_shifts_per_img = x_shifts * exp_strides[layer_index]
+            # y_shifts_per_img = y_shifts * exp_strides[layer_index]
+            x_shifts_per_img = x_shifts[0] * exp_strides
+            y_shifts_per_img = y_shifts[0] * exp_strides
+
+            # 获取每个格点的中心坐标,左上角为原点, x_c_per_img.shape = [kinds_of_anchors, num_gt_per_batch, total_num_anchors]
+            x_c_per_img = ((x_shifts_per_img + 0.5 * exp_strides).unsqueeze(0).repeat(kinds_of_anchors,num_gt, 1))
+            y_c_per_img = ((y_shifts_per_img + 0.5 * exp_strides).unsqueeze(0).repeat(kinds_of_anchors,num_gt, 1))
+
+            # 初步筛选
+            # t.shape = (kinds_of_anchors, num_gt, [class,x,y,w,h,theta])
+            gt_l = (t[:, :, :, 0] - 0.5 * t[:, :, :, 2])# shape=(kinds_of_anchor, num_gt_per_img, total_anchors)
+            gt_t = (t[:, :, :, 1] - 0.5 * t[:, :, :, 3])
+            gt_r = (t[:, :, :, 0] + 0.5 * t[:, :, :, 2])
+            gt_b = (t[:, :, :, 1] + 0.5 * t[:, :, :, 3])
+            # gt_b = ((t[:, :, :, 1] + 0.5 * t[:, :, :, 3]).unsqueeze(-1).repeat(1, 1, total_num_anchors))
+
+            '''
+            计算出每个anchor的左上角和右上角坐标（左上角为原点），然后与真实的标签值进行判断“当前anchor是否处于GT的内部”：如果是则为正样本
+            '''
+            bbox_l = x_c_per_img - gt_l
+            bbox_r = gt_r - x_c_per_img
+            bbox_t = y_c_per_img - gt_t
+            bbox_b = gt_b - y_c_per_img
+            bboxes = torch.stack([bbox_l, bbox_t, bbox_r, bbox_b], 3)  # size = (kinds_of_anchors, num_gt, feature_size1*feature_size2,4)
+
+            # 然后将所有落在GT中的anchor挑选出来
+            in_boxes = bboxes.min(dim=-1).values > 0.0  # 必须全部大于0才是需要的anchor
+            in_boxes_all = in_boxes.sum(dim=0) > 0  # 中心点位于标注框内的锚框为True,相当于一个mask
+
+            '''
+            再次筛选：绘制一个边长为5的正方形。左上角点为（gt_l，gt_t），右下角点为（gt_r，gt_b）。gt以正方形范围形式去挑选锚框
+            t.shape = [class,x,y,w,h,theta]
+            '''
+            radius = 2  # TODO：半径如果过大，似乎会过多增加样本，导致训练时间很长，尝试半径为1
+            gt_l = (t[:, :, :, 0]) - radius * exp_strides # x - radius*stride
+            gt_t = (t[:, :, :, 1]) - radius * exp_strides # y - radius*stride
+            gt_r = (t[:, :, :, 0]) + radius * exp_strides
+            gt_b = (t[:, :, :, 1]) + radius * exp_strides
+
+            c_l = x_c_per_img - gt_l
+            c_r = gt_r - x_c_per_img
+            c_t = y_c_per_img - gt_t
+            c_b = gt_b - y_c_per_img
+            center = torch.stack([c_l, c_t, c_r, c_b], 3)
+            in_centers = center.min(dim=-1).values > 0.0
+            in_centers_all = in_centers.sum(dim=0) > 0
+
+            # 某一边在gt里面
+            # boxes_or_center.append(in_boxes_all | in_centers_all)
+            boxes_or_center = (in_boxes_all & in_centers_all).repeat(kinds_of_anchors,1,1)  # 非 list版本
+
+            # 两者都在gt里面
+            # boxes_and_center.append(in_boxes[:, boxes_or_center[i]] & in_centers[:, boxes_or_center[i]])
+            # boxes_and_center = (in_boxes[:, boxes_or_center] & in_centers[:, boxes_or_center]).unsqueeze(0).repeat(kinds_of_anchors,1,1)  # 非 list版本
+
+            # return boxes_or_center, boxes_and_center
+            # boxes_or_center = boxes_or_center.repeat(kinds_of_anchors,1,1)
+            return boxes_or_center
+
+    # 利用FCOS中的中心度计算对筛选的样本进行惩罚：远离GT中心的中心度值越小
+    def get_centerness_targets(self, box_targets):
+        left_and_right = box_targets[:, [0,2]]
+        top_and_bottom = box_targets[:, [1,3]]
+        centerness = (left_and_right.min(dim=-1)[0] / left_and_right.max(dim=-1)[0]) * \
+                     (top_and_bottom.min(dim=-1)[0] / top_and_bottom.max(dim=-1)[0])
+        return torch.sqrt(centerness)
+
+    def get_coordinate(self, t):
+        target_l = (t[:, 0] - 0.5 * t[:, 2])
+        target_t = (t[:, 1] - 0.5 * t[:, 3])
+        target_r = (t[:, 0] + 0.5 * t[:, 2])
+        target_b = (t[:, 1] + 0.5 * t[:, 3])
+        return torch.stack([target_l, target_t, target_r, target_b], 1)
 
 '''
 2021年11月10日14:16:50
@@ -719,10 +867,13 @@ class KLDloss(nn.Module):
                       + torch.log(torch.pow(target[:, 2], 2) / torch.pow(pred[:, 2], 2))
                      )\
              - 1.0
+        # kld = kld.sigmoid() # add，防止梯度爆炸
+        new_kld=torch.clip(torch.log(kld + 1),1e-10,100)
+        # kld_loss = 1.0 - 1.0 / (self.taf + torch.log(new_kld + 1))
+        kld_loss = 1.0 - 1.0 / (self.taf + new_kld)
 
-        kld_loss = 1 - 1 / (self.taf + torch.log(kld + 1))
         # return kld_loss
-        return kld_loss.sigmoid()
+        return kld_loss
 
 class ComputeLoss_AnchorFree_Decoupled:
         # Compute losses
@@ -832,7 +983,7 @@ class ComputeLoss_AnchorFree_Decoupled:
 
                 # 逐个batch的处理
                 for batch_id in range(pi.shape[0]):
-                    # TODO:eg：由于targets的第二个维度中的第一列是batch的id，所以需要加一个掩膜，来索引对应batch的GT
+                    #  :eg：由于targets的第二个维度中的第一列是batch的id，所以需要加一个掩膜，来索引对应batch的GT
                     gt_batch_mask = (targets[:, 0] == batch_id) # gt_batch_mask.shape = (当前batch的num_gt, 7)
                     batch_targets = targets[gt_batch_mask] # 获取某一个batch的GT值
                     num_gt_per_batch = batch_targets.shape[0]  # 当前image中GT的数量,shape = (num_gt_per_batch,[class,x,y,w,h,theta])
@@ -845,7 +996,7 @@ class ComputeLoss_AnchorFree_Decoupled:
                     cls_preds = batch_pi[:, 6:]
 
                     if num_gt_per_batch:
-                        # TODO：初筛操作,anchor_mask.shape=(size1*size2),in_boxes_and_center.shape=(num_gt_per_batch, size1*size2)
+                        #  ：初筛操作,anchor_mask.shape=(size1*size2),in_boxes_and_center.shape=(num_gt_per_batch, size1*size2)
                         anchor_mask, in_boxes_and_center = self.get_anchor_info(batch_pi, batch_targets, num_gt_per_batch, layer_index=layer_id)
 
                         # 获取真实值的信息
@@ -853,7 +1004,7 @@ class ComputeLoss_AnchorFree_Decoupled:
                         gt_angles = batch_targets[:num_gt_per_batch, 6]
                         gt_classes = batch_targets[:num_gt_per_batch, 1] #
 
-                        # TODO：根据初筛得到的mask将网络的输出进行“初步筛选”
+                        #  ：根据初筛得到的mask将网络的输出进行“初步筛选”
                         bboxes_preds = bboxes_preds[anchor_mask] # shape = (num_select, 4)
                         angle_preds = angle_preds[anchor_mask] # shape = (num_select,1)
                         obj_preds = obj_preds[anchor_mask]
@@ -864,7 +1015,7 @@ class ComputeLoss_AnchorFree_Decoupled:
                         gt_bboxes_with_angle = torch.cat((gt_bboxes, gt_angles.unsqueeze(1)), dim=1) # shape=（num_gt，4+1）
                         pred_bboxes_with_angle = torch.cat((bboxes_preds,angle_preds.unsqueeze(1)), dim=1)# shape=（num_select，4+1）
 
-                        # TODO: 将初步筛选的bbox（num_select,5)与真实值（num_gt,5）作loss
+                        #  : 将初步筛选的bbox（num_select,5)与真实值（num_gt,5）作loss
                         # pairwise_iou_loss.shape = (num_in_anchor, num_select)
                         pairwise_iou_loss = self.compute_kld_loss(pred_bboxes_with_angle, gt_bboxes_with_angle)
                         pairwise_iou_approximate = 1.0 - pairwise_iou_loss # 取loss的近似值
@@ -898,7 +1049,7 @@ class ComputeLoss_AnchorFree_Decoupled:
                         #     返回匹配到的预测框数量，匹配到的cls, 匹配到的iou,匹配到的gt的index
                         #     num_matched_anchors, matched_classes_per_gt,matched_ious_per_gt, matched_gt_index
 
-                        # TODO: self.dynamic_k_matching()该方法目前有bug
+                        #  : self.dynamic_k_matching()该方法目前有bug
                         (num_matched_anchors, matched_classes_per_gt, matched_ious_per_gt, matched_gt_index, mask_in_boxes)=self.dynamic_k_matching(cost, pairwise_iou_approximate, gt_classes, num_gt_per_batch, anchor_mask)
 
 
@@ -973,7 +1124,7 @@ class ComputeLoss_AnchorFree_Decoupled:
             x_c_per_img = ((x_shifts_per_img + 0.5 * exp_strides).repeat(num_gt_per_batch, 1))
             y_c_per_img = ((y_shifts_per_img + 0.5 * exp_strides).repeat(num_gt_per_batch, 1))
 
-            # TODO：初步筛选
+            #  ：初步筛选
             # 计算标签的左上角和右下角坐标，即（[left,top], [right,bottom])
             # gt_xxx与x_c_per_img维度应该相同
             # gt_l = ( (t[: , :, 2] - 0.5 * t[:, :, 4]).squeeze(1).repeat(1,total_num_anchors))
@@ -985,7 +1136,7 @@ class ComputeLoss_AnchorFree_Decoupled:
             gt_r = ((t[:, 2] + 0.5 * t[:, 4]).unsqueeze(1).repeat(1, total_num_anchors))
             gt_b = ((t[:, 3] + 0.5 * t[:, 5]).unsqueeze(1).repeat(1, total_num_anchors))
 
-            # TODO ：anchor free的思路是每个格点都作为一个预测的anchor，因此anchor数量就是当前的特征图大小;
+            #   ：anchor free的思路是每个格点都作为一个预测的anchor，因此anchor数量就是当前的特征图大小;
             # 计算出每个anchor的左上角和右上角坐标（左上角为原点），然后与真实的标签值进行判断“当前anchor是否处于GT的内部”：如果是则为正样本
             bbox_l = x_c_per_img - gt_l
             bbox_r = gt_r - x_c_per_img
@@ -997,7 +1148,7 @@ class ComputeLoss_AnchorFree_Decoupled:
             in_boxes = bboxes.min(dim=-1).values > 0.0  # 必须全部大于0才是需要的anchor
             in_boxes_all = in_boxes.sum(dim=0) > 0  # 中心点位于标注框内的锚框为True,相当于一个mask
 
-            # TODO 再次筛选：绘制一个边长为5的正方形。左上角点为（gt_l，gt_t），右下角点为（gt_r，gt_b）。gt以正方形范围形式去挑选锚框
+            #   再次筛选：绘制一个边长为5的正方形。左上角点为（gt_l，gt_t），右下角点为（gt_r，gt_b）。gt以正方形范围形式去挑选锚框
             radius = 2  # 半径
             # gt_l = (targets[:, 2].unsqueeze(1).repeat(1, total_num_anchors)) - radius * exp_strides[i]# x - radius*stride
             # gt_r = (targets[:, 2].unsqueeze(1).repeat(1, total_num_anchors)) + radius * exp_strides[i]
@@ -1089,7 +1240,7 @@ class ComputeLoss_AnchorFree_Decoupled:
             matching_matrix = torch.zeros_like(cost)
 
             iou_in_boxes = pairwise_iou_approximate # shape(num_gt, num_select)
-            # TODO：1.设置前K个候选框,源代码k=10，这里考虑到速度问题取5
+            #  ：1.设置前K个候选框,源代码k=10，这里考虑到速度问题取5
             top_k_anchor = min(10, iou_in_boxes.size(1))
 
             # 然后给每个目标挑选前K个候选框，topk_anchor_per_gt.shape = (num_gt, k)
@@ -1105,7 +1256,7 @@ class ComputeLoss_AnchorFree_Decoupled:
             '''
             dynamic_k = torch.clamp(topk_anchor_per_gt.sum(1).int(), min=1) # topk_anchor_per_gt.sum(1).int():假设该矩阵维度=(3,5)，则把每一行进行相加最后得到一列3行的数据，这样就得到了每个gt对应的候选框最大值
             for gt_id in range(num_gt):
-                # TODO：2.通过cost来挑选候选框
+                #  ：2.通过cost来挑选候选框
                 # 这里就相当于给每个gt动态的分配候选框，其中被分配到的候选框的索引会记录到“matching_matrix“矩阵中，对应位置=1
                 try:
                     _, res = torch.topk(cost[gt_id], k=dynamic_k[gt_id].item(), largest=False)
@@ -1117,8 +1268,8 @@ class ComputeLoss_AnchorFree_Decoupled:
                 # matching_matrix[gt_id][res] = 1.0
             # del topk_anchor_per_gt, dynamic_k, res
 
-            # TODO：3.过滤共用的候选框，即矩阵中同一列有多个1那种，如果有一个候选框被多个”目标“选中，这时候要比较其对应的cost值，较小的值保留候选框
-            # TODO：如果存在cost值相等的该怎么办？
+            #  ：3.过滤共用的候选框，即矩阵中同一列有多个1那种，如果有一个候选框被多个”目标“选中，这时候要比较其对应的cost值，较小的值保留候选框
+            #  ：如果存在cost值相等的该怎么办？
             anchor_matching_gt = matching_matrix.sum(0)
             if (anchor_matching_gt > 1).sum() > 0: # anchor_matching_gt > 1表示存在二义性的候选框
                 _, cost_argmin = torch.min(cost[:, anchor_matching_gt > 1], dim=0)# 将cost中，第对应列的值取出，并进行比较，计算最小值所对应的行数，以及分数。
@@ -1140,17 +1291,17 @@ class ComputeLoss_AnchorFree_Decoupled:
             # 返回匹配到的预测框数量，匹配到的cls, 匹配到的iou,匹配到的gt的index
             return num_matched_anchors, matched_classes_per_gt,matched_ious_per_gt, matched_gt_index, mask_in_boxes
 
-# TODO：将基于Shape的筛选策略修改为“中心点策略”，同时考虑加上额外的惩罚机制
+#  ：将基于Shape的筛选策略修改为“中心点策略”，同时考虑加上额外的惩罚机制
 class ComputeLoss_AnchorFree_Decoupled_CenterPoint:
     # Compute losses
     def __init__(self, model, autobalance=False, hyp=None): # add hyp for debug, 2021年11月25日11:19:51
         self.sort_obj_iou = False
-        device = next(model.parameters()).device  # get model device # TODO： debug时注销
+        device = next(model.parameters()).device  # get model device #  ： debug时注销
 
-        # h = model.hyp  # hyperparameters
-        h = hyp  # hyperparameters
-        # self.class_index = 5 + model.nc
-        self.class_index = 5 + 16
+        h = model.hyp  # hyperparameters
+        # h = hyp  # hyperparameters
+        self.class_index = 5 + model.nc
+        # self.class_index = 5 + 16
         self.model = model  # 复制model，方便后面索引，add
 
         # Define criteria
@@ -1225,10 +1376,11 @@ class ComputeLoss_AnchorFree_Decoupled_CenterPoint:
         # num_gt = max(targets.shape[0],1)
         num_gt = targets.shape[0]
         if num_gt:
-            # lbox += (self.iou_loss(reg_targets_with_angle, bbox_preds_with_angle.view(-1, 5)[anchor_masks])).sum() / num_gt # reg_targets_with_angle.shape = (18,5), bbox_preds_with_angle.view(-1, 5).shape = (400,5)
-            lbox += (self.giou_loss(p_box=reg_targets_with_angle, t_box=bbox_preds_with_angle.view(-1, 5)[anchor_masks])).sum() / num_gt # reg_targets_with_angle.shape = (18,5), bbox_preds_with_angle.view(-1, 5).shape = (400,5)
+            lbox += (self.iou_loss(reg_targets_with_angle, bbox_preds_with_angle.view(-1, 5)[anchor_masks])).sum() / num_gt # reg_targets_with_angle.shape = (18,5), bbox_preds_with_angle.view(-1, 5).shape = (400,5)
+            # lbox += (self.giou_loss(p_box=reg_targets_with_angle, t_box=bbox_preds_with_angle.view(-1, 5)[anchor_masks])).sum() / num_gt # reg_targets_with_angle.shape = (18,5), bbox_preds_with_angle.view(-1, 5).shape = (400,5)
+            # Classification
             lcls += (self.BCEcls(cls_preds.view(-1, self.nc)[anchor_masks], cls_targets.to(torch.float32))).sum() / num_gt
-            lobj += (self.BCEobj(obj_preds.view(-1, 1)[anchor_masks], obj_targets[anchor_masks].float())).sum() / num_gt  # obj_preds[i].shape=(total_anchors,1) obj_targets[i].shape=(total_anchors,1)
+            lobj += (self.BCEobj(obj_preds.view(-1, 1)[anchor_masks], obj_targets[anchor_masks].to(torch.float32))).sum() / num_gt  # obj_preds[i].shape=(total_anchors,1) obj_targets[i].shape=(total_anchors,1)
 
             # lobj += (self.BCEobj(obj_preds.view(-1, 1)[anchor_masks], obj_targets[anchor_masks].float())).sum()  # obj_preds[i].shape=(total_anchors,1) obj_targets[i].shape=(total_anchors,1)
             # lbox *= self.hyp['box']
@@ -1240,6 +1392,7 @@ class ComputeLoss_AnchorFree_Decoupled_CenterPoint:
         return (lbox + lobj + lcls), torch.cat((lbox, lobj, lcls)).detach()  # 因为 loss不参与更新，所以直接detach()
 
     # 就类似于get_assignments()方法-yolox
+    @torch.no_grad() # 不参与网络的更新存储，不然容易爆显存
     def build_targets_anchor_free(self, p, targets):
         '''
         @param p: list: [small_forward, medium_forward, large_forward]
@@ -1264,7 +1417,7 @@ class ComputeLoss_AnchorFree_Decoupled_CenterPoint:
 
             # 逐个batch的处理
             for batch_id in range(pi.shape[0]):
-                # TODO:eg：由于targets的第二个维度中的第一列是batch的id，所以需要加一个掩膜，来索引对应batch的GT
+                #  :eg：由于targets的第二个维度中的第一列是batch的id，所以需要加一个掩膜，来索引对应batch的GT
                 gt_batch_mask = (targets[:, 0] == batch_id)  # gt_batch_mask.shape = (当前batch的num_gt, 7)
                 batch_targets = targets[gt_batch_mask]  # 获取某一个batch的GT值
                 num_gt_per_batch = batch_targets.shape[
@@ -1275,7 +1428,7 @@ class ComputeLoss_AnchorFree_Decoupled_CenterPoint:
                 bboxes_preds = batch_pi[:, 0:4]  # shape = (batch, size1*size2, [x,y,w,h,theta,obj,class])
 
                 if num_gt_per_batch:
-                    # TODO：初筛操作,anchor_mask.shape=(size1*size2),in_boxes_and_center.shape=(num_gt_per_batch, size1*size2)
+                    #  ：初筛操作,anchor_mask.shape=(size1*size2),in_boxes_and_center.shape=(num_gt_per_batch, size1*size2)
                     # in_boxes_and_center: 一个mask，纵轴表示每个GT匹配到的正样本
                     # in_boxes_and_center.sum(1) # 表示同一行全部相加，结果是行的个数，每个位置表示GT有多少个匹配到的Anchor
                     anchor_mask, in_boxes_and_center = self.get_anchor_info(batch_pi, batch_targets, num_gt_per_batch,
@@ -1363,7 +1516,7 @@ class ComputeLoss_AnchorFree_Decoupled_CenterPoint:
         x_c_per_img = ((x_shifts_per_img + 0.5 * exp_strides).repeat(num_gt_per_batch, 1))
         y_c_per_img = ((y_shifts_per_img + 0.5 * exp_strides).repeat(num_gt_per_batch, 1))
 
-        # TODO：初步筛选
+        #  ：初步筛选
         # 计算标签的左上角和右下角坐标，即（[left,top], [right,bottom])
         # gt_xxx与x_c_per_img维度应该相同
         # gt_l = ( (t[: , :, 2] - 0.5 * t[:, :, 4]).squeeze(1).repeat(1,total_num_anchors))
@@ -1375,7 +1528,7 @@ class ComputeLoss_AnchorFree_Decoupled_CenterPoint:
         gt_r = ((t[:, 2] + 0.5 * t[:, 4]).unsqueeze(1).repeat(1, total_num_anchors))
         gt_b = ((t[:, 3] + 0.5 * t[:, 5]).unsqueeze(1).repeat(1, total_num_anchors))
 
-        # TODO ：anchor free的思路是每个格点都作为一个预测的anchor，因此anchor数量就是当前的特征图大小;
+        #   ：anchor free的思路是每个格点都作为一个预测的anchor，因此anchor数量就是当前的特征图大小;
         # 计算出每个anchor的左上角和右上角坐标（左上角为原点），然后与真实的标签值进行判断“当前anchor是否处于GT的内部”：如果是则为正样本
         bbox_l = x_c_per_img - gt_l
         bbox_r = gt_r - x_c_per_img
@@ -1387,7 +1540,7 @@ class ComputeLoss_AnchorFree_Decoupled_CenterPoint:
         in_boxes = bboxes.min(dim=-1).values > 0.0  # 必须全部大于0才是需要的anchor
         in_boxes_all = in_boxes.sum(dim=0) > 0  # 中心点位于标注框内的锚框为True,相当于一个mask
 
-        # TODO 再次筛选：绘制一个边长为5的正方形。左上角点为（gt_l，gt_t），右下角点为（gt_r，gt_b）。gt以正方形范围形式去挑选锚框
+        #   再次筛选：绘制一个边长为5的正方形。左上角点为（gt_l，gt_t），右下角点为（gt_r，gt_b）。gt以正方形范围形式去挑选锚框
         radius = 2  # 半径
         # gt_l = (targets[:, 2].unsqueeze(1).repeat(1, total_num_anchors)) - radius * exp_strides[i]# x - radius*stride
         # gt_r = (targets[:, 2].unsqueeze(1).repeat(1, total_num_anchors)) + radius * exp_strides[i]
@@ -1432,7 +1585,7 @@ class ComputeLoss_AnchorFree_Decoupled_CenterPoint:
             p_x1, p_y1, p_x2, p_y2 = p_box[0], p_box[1], p_box[2], p_box[3]
             t_x1, t_y1, t_x2, t_y2 = t_box[0], t_box[1], t_box[2], t_box[3]
         else:
-            # TODO: x,y,w,h,angle转化为x1,y1,x2,y2,左上角和右下角
+            #  : x,y,w,h,angle转化为x1,y1,x2,y2,左上角和右下角
             p_x1, p_x2 = p_box[0] - p_box[2] / 2, p_box[0] + p_box[2] / 2
             p_y1, p_y2 = p_box[1] - p_box[3] / 2, p_box[1] + p_box[3] / 2
             t_x1, t_x2 = t_box[0] - t_box[2] / 2, t_box[0] + t_box[2] / 2
@@ -1484,53 +1637,7 @@ class ComputeLoss_AnchorFree_Decoupled_CenterPoint:
         else:
             return iou  # IoU
 
-class ComputeLoss_AnchorFree_FCOS:
-    def __init__(self, model, autobalance=False):
-        self.sort_obj_iou = False
-        device = next(model.parameters()).device  # get model device
-        h = model.hyp  # hyperparameters
-        self.class_index = 5 + model.nc
-        self.model = model  # 复制model，方便后面索引，add
 
-        # Define criteria
-        BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['cls_pw']], device=device))
-        BCEobj = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['obj_pw']], device=device))
-        BCEangle = nn.BCEWithLogitsLoss(pos_weight=torch.Tensor([h['angle_pw']])).to(device)
-
-        # Class label smoothing https://arxiv.org/pdf/1902.04103.pdf eqn 3
-        self.cp, self.cn = smooth_BCE(eps=h.get('label_smoothing', 0.0))  # positive, negative BCE targets
-
-        # Focal loss
-        g = h['fl_gamma']  # focal loss gamma
-        if g > 0:
-            BCEcls, BCEobj = FocalLoss(BCEcls, g), FocalLoss(BCEobj, g)
-            BCEangle = FocalLoss(BCEangle, g)
-
-        # 获取每一层的output
-        det = model.module.model[-1] if is_parallel(model) else model.model[-1]  # Detect() module
-        self.balance = {3: [4.0, 1.0, 0.4]}.get(det.nl, [4.0, 1.0, 0.25, 0.06, .02])  # P3-P7
-        self.ssi = list(det.stride).index(16) if autobalance else 0  # stride 16 index
-        self.BCEcls, self.BCEobj, self.gr, self.hyp, self.autobalance = BCEcls, BCEobj, 1.0, h, autobalance
-        self.BCEangle = BCEangle
-        self.iou_loss = KLDloss()  # add
-
-        # 设置属性
-        for k in 'na', 'nc', 'nl', 'anchors':
-            setattr(self, k, getattr(det, k))
-
-    def __call__(self, p, targets, imgs=None, img_path=None):  # predictions, targets, model, 增加了两个可视化参数imgs, img_path
-        '''
-            @param p: list: [small_forward, medium_forward, large_forward]
-                eg:small_forward.size=( batch_size, 1种scale框, size1, size2, [class,x,y,w,h,theta])
-            @param targets: shape=(num_gt, [batch_size, class_id, x,y,w,h,theta])
-        '''
-        device = targets.device
-
-    def build_targets(self,p,targets):
-        pass
-        '''
-            
-        '''
 
 if __name__=='__main__':
     logging.basicConfig(format='%(asctime)s - %(levelname)s: %(message)s ', level=logging.INFO)
@@ -1543,7 +1650,7 @@ if __name__=='__main__':
             yolov5m-asff: 10948910
     """
     parser = argparse.ArgumentParser()
-    parser.add_argument('--cfg', type=str, default='../models/yolov5m.yaml', help='model.yaml')
+    parser.add_argument('--cfg', type=str, default='../models/yolov5m-anchor-based-center.yaml', help='model.yaml')
     # parser.add_argument('--cfg', type=str, default='yolov5m-anchor-free-decoupled.yaml', help='model.yaml')
     parser.add_argument('--hyp', type=str,
                         default='..//data/hyps/hyp.scratch.yaml',
@@ -1563,7 +1670,10 @@ if __name__=='__main__':
     model = Model(opt.cfg, ch=3, nc=16, anchors=hyp.get('anchors')).to(device)
     logging.info("loaded model done!")
 
-    loss = ComputeLoss_AnchorFree_Decoupled_CenterPoint(model,hyp = hyp)
-
+    p = [torch.randn([2,3,32,32,22]).to(device), torch.randn([2,3,16,16,22]).to(device), torch.randn([2,3,8,8,22]).to(device)]
+    targets = torch.randn([5,7]) # torch.Size = (该batch中的目标数量, [该image属于该batch的第几个图片, class, xywh, Θ])
+    loss = ComputeLoss_Central_Point(model,hyp = hyp)
+    # loss = ComputeLoss(model,hyp = hyp)
+    loss(p,targets.to(device))
 
 

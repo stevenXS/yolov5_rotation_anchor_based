@@ -117,7 +117,7 @@ def create_dataloader(path, imgsz, batch_size, stride, single_cls=True, hyp=None
                         batch_size=batch_size,
                         num_workers=nw,
                         sampler=sampler,
-                        pin_memory=True,
+                        pin_memory=True, # TODO: 如果为True会提前将下一个batch的数据加载到GPU显存中，因此worker比较多的时候就会增加GPU显存负担
                         collate_fn=LoadImagesAndLabels.collate_fn4 if quad else LoadImagesAndLabels.collate_fn)
     return dataloader, dataset
 

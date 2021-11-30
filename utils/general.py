@@ -816,6 +816,148 @@ def non_max_suppression_anchor_free(prediction, conf_thres=0.25, iou_thres=0.45,
             boxes_for_cv2_nms.append((boxes_xy[box_inds], boxes_wh[box_inds], boxes_angle[box_inds]))
         # i = torchvision.ops.nms(boxes, scores, iou_thres)  # NMS
 
+        """
+            NMSBoxes(bboxes, scores, score_threshold, nms_threshold[, eta[, top_k]]) -> indices
+            .   @brief Performs non maximum suppression given boxes and corresponding scores.
+            .   
+            .   * @param bboxes a set of bounding boxes to apply NMS.
+            .   * @param scores a set of corresponding confidences.
+            .   * @param score_threshold a threshold used to filter boxes by score.
+            .   * @param nms_threshold a threshold used in non maximum suppression.
+            .   * @param indices the kept indices of bboxes after NMS.
+            .   * @param eta a coefficient in adaptive threshold formula: \f$nms\_threshold_{i+1}=eta\cdot nms\_threshold_i\f$.
+            .   * @param top_k if `>0`, keep at most @p top_k picked indices.
+            eg:输入的坐标是x,y,w,h
+        """
+        i = None
+        try:
+            i = cv2.dnn.NMSBoxesRotated(boxes_for_cv2_nms, scores_for_cv2_nms, conf_thres, iou_thres)
+            if i is not None and i.shape[0] > max_det:  # limit detections
+                i = i[:max_det]
+        except Exception as e:
+            logging.info(e)
+        # i = np.squeeze(i, axis=-1) # add, 突然出现的bug，2021年11月9日17:46:22
+
+        if merge and (1 < n < 3E3):  # Merge NMS (boxes merged using weighted mean)
+            # update boxes as boxes(i,4) = weights(i,n) * boxes(n,4)
+            iou = box_iou(boxes[i], boxes) > iou_thres  # iou matrix
+            weights = iou * scores[None]  # box weights
+            x[i, :4] = torch.mm(weights, x[:, :4]).float() / weights.sum(1, keepdim=True)  # merged boxes
+            if redundant:
+                i = i[iou.sum(1) > 1]  # require redundancy
+
+        output[xi] = x[i]
+        if (time.time() - t) > time_limit:
+            print(f'WARNING: NMS time limit {time_limit}s exceeded')
+            break  # time limit exceeded
+
+    return output
+
+# TODO
+def non_max_suppression_rotate(prediction, conf_thres=0.25, iou_thres=0.45, classes=None, agnostic=False, multi_label=False,
+                        labels=(), max_det=300):
+    """
+    @param prediction: shape=torch.Size([4, 42588, 201])
+    @return: list of detections, on (n,6) tensor per image [xyxy, conf, cls]
+    """
+
+    nc = prediction.shape[2] - 5 - 180  # number of classes for anchor based
+    xc = prediction[..., 4] > conf_thres  # candidates
+
+    # Checks
+    assert 0 <= conf_thres <= 1, f'Invalid Confidence threshold {conf_thres}, valid values are between 0.0 and 1.0'
+    assert 0 <= iou_thres <= 1, f'Invalid IoU {iou_thres}, valid values are between 0.0 and 1.0'
+
+    # Settings
+    min_wh, max_wh = 2, 4096  # (pixels) minimum and maximum box width and height
+    max_nms = 30000  # maximum number of boxes into torchvision.ops.nms()
+    time_limit = 10.0  # seconds to quit after
+    redundant = True  # require redundant detections
+    multi_label &= nc > 1  # multiple labels per box (adds 0.5ms/img)
+    merge = False  # use merge-NMS
+
+    t = time.time()
+    # prediction.shape[0]表示预测出了多少个结果，因此output需要重复prediction.shape[0]次
+    output = [torch.zeros((0, 7), device=prediction.device)] * prediction.shape[0]
+    for xi, x in enumerate(prediction):  # image index, image inference
+        # Apply constraints
+        # x[((x[..., 2:4] < min_wh) | (x[..., 2:4] > max_wh)).any(1), 4] = 0  # width-height
+        x = x[xc[xi]]  # confidence, xc[xi]表示选出第xi个目标的预测值，它是mask，然后去过滤其对应的输出x；
+
+        # Cat apriori labels if autolabelling
+        if labels and len(labels[xi]):
+            l = labels[xi]
+            v = torch.zeros((len(l), nc + 5 + 180), device=x.device)
+            v[:, :4] = l[:, 1:5]  # box
+            v[:, 4] = 1.0  # conf
+            v[range(len(l)), l[:, 0].long() + 5] = 1.0  # cls
+            v[range(len(l)), l[:, 5].long() + 5 + nc] = 1.0  # angle
+            x = torch.cat((x, v), 0)
+
+        # If none remain process next image
+        if not x.shape[0]:
+            continue
+
+        # Compute conf
+        x[:, 5:5 + nc] *= x[:, 4:5]  # conf = obj_conf * cls_conf
+
+        # Get center x, y, w, h
+        xy = x[:, :2]
+        wh = x[:, 2:4]
+
+        # Box (center x, center y, width, height) to (x1, y1, x2, y2)
+        box = xywh2xyxy(x[:, :4])
+
+        # Detections matrix nx6 (xyxy, conf, cls)
+        if multi_label:
+            i, j = (x[:, 5:5 + nc] > conf_thres).nonzero(as_tuple=False).T
+            conf_angle, j_angle = x[i, 5 + nc:].max(1, keepdim=True)
+            x = torch.cat((box[i], x[i, j + 5, None], j[:, None].float(), j_angle.float()), 1)
+            xy = xy[i]
+            wh = wh[i]
+        else:  # best class only
+            conf, j = x[:, 5:5 + nc].max(1, keepdim=True)  # 获取对应预测的置信度和其对应的索引值
+            conf_angle, j_angle = x[:, 5 + nc:].max(1, keepdim=True)  # 返回预测到的角度的置信度即其对应的索引值
+            inds = conf.view(-1) > conf_thres  # 得到一个类别的掩膜
+            x = torch.cat((box, conf, j.float(), j_angle.float()), 1)[inds]  # x是经过掩膜筛选后的所有结果：[x,y,w,h,classId,angle]
+            xy = xy[inds]
+            wh = wh[inds]
+
+        # Filter by class
+        if classes is not None:
+            inds = (x[:, 5:6] == torch.tensor(classes, device=x.device)).any(1)
+            x = x[inds]
+            xy = xy[inds]
+            wh = wh[inds]
+
+        # Apply finite constraint
+        # if not torch.isfinite(x).all():
+        #     x = x[torch.isfinite(x).all(1)]
+
+        # Check shape
+        n = x.shape[0]  # number of boxes
+        if not n:  # no boxes
+            continue
+        elif n > max_nms:  # excess boxes
+            keep_inds = x[:, 4].argsort(descending=True)[:max_nms]
+            x = x[keep_inds]  # sort by confidence
+            xy = xy[keep_inds]
+            wh = wh[keep_inds]
+
+        # Batched NMS
+        c = x[:, 5:6] * (0 if agnostic else max_wh)  # classes
+        boxes, scores = x[:, :4] + c, x[:, 4]  # boxes (offset by class), scores
+        boxes_xy = (xy + c).int().cpu().numpy().tolist()
+        boxes_wh = wh.int().cpu().numpy().tolist()
+        boxes_angle = x[:, 6].int().cpu().numpy().tolist()
+
+        scores_for_cv2_nms = scores.cpu().numpy()
+        boxes_for_cv2_nms = []
+
+        for box_inds, box_xy in enumerate(boxes_xy):
+            boxes_for_cv2_nms.append((boxes_xy[box_inds], boxes_wh[box_inds], boxes_angle[box_inds]))
+        # i = torchvision.ops.nms(boxes, scores, iou_thres)  # NMS
+
         i = cv2.dnn.NMSBoxesRotated(boxes_for_cv2_nms, scores_for_cv2_nms, conf_thres, iou_thres)
         # i = np.squeeze(i, axis=-1) # add, 突然出现的bug，2021年11月9日17:46:22
 
@@ -835,6 +977,7 @@ def non_max_suppression_anchor_free(prediction, conf_thres=0.25, iou_thres=0.45,
             break  # time limit exceeded
 
     return output
+
 #------------------------------------------------#
 def non_max_suppression(prediction, conf_thres=0.25, iou_thres=0.45, classes=None, agnostic=False, multi_label=False,
                         labels=(), max_det=300):
@@ -941,7 +1084,7 @@ def non_max_suppression(prediction, conf_thres=0.25, iou_thres=0.45, classes=Non
         # i = torchvision.ops.nms(boxes, scores, iou_thres)  # NMS
         
         i = cv2.dnn.NMSBoxesRotated(boxes_for_cv2_nms, scores_for_cv2_nms, conf_thres, iou_thres)
-        # i = np.squeeze(i, axis=-1) # add, 突然出现的bug，2021年11月9日17:46:22
+        i = np.squeeze(i, axis=-1) # add, 突然出现的bug，2021年11月9日17:46:22
 
         if i.shape[0] > max_det:  # limit detections
             i = i[:max_det]

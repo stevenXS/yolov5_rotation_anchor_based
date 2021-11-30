@@ -27,11 +27,11 @@
 #train: /home/fofo/A/xsq/datasets/dota-v15/train2021/images # fofo-dota
 #val: /home/fofo/A/xsq/datasets/dota-v15/val2021/images # fofo-dota
 
-#train: /home/fofo/A/xsq/datasets/dota-v15/mini-dota/images # fofo-dota
-#val: /home/fofo/A/xsq/datasets/dota-v15/mini-dota/images # fofo-dota
+#train: /home/fofo/A/xsq/datasets/dota-v15/mini-dota/images # fofo-dota 5K
+#val: /home/fofo/A/xsq/datasets/dota-v15/val2021/images # fofo-dota  5K
 
-train: /home/fofo/A/xsq/datasets/dota-v15/rotate_val/images # fofo-dota
-val: /home/fofo/A/xsq/datasets/dota-v15/rotate_val/images # fofo-dota
+train: /home/fofo/A/xsq/datasets/dota-v15/rotate_val/images # fofo-dota  38
+val: /home/fofo/A/xsq/datasets/dota-v15/rotate_val/images # fofo-dota  38
 
 # number of classes
 nc: 16

@@ -24,11 +24,11 @@
 #train: /home/jojo/VSST/xsq/datasets/dota-v15/train2021/images # jojo-dota
 #val: /home/jojo/VSST/xsq/datasets/dota-v15/val2021/images # jojo-dota
 
-#train: /home/fofo/A/xsq/datasets/dota-v15/train2021/images # fofo-dota
-#val: /home/fofo/A/xsq/datasets/dota-v15/val2021/images # fofo-dota
+train: /home/fofo/A/xsq/datasets/dota-v15/train2021/images # fofo-dota dota-1.5
+val: /home/fofo/A/xsq/datasets/dota-v15/val2021/images # fofo-dota dota-1.5
 
-train: /home/fofo/A/xsq/datasets/dota-v15/mini-dota/images # fofo-dota
-val: /home/fofo/A/xsq/datasets/dota-v15/mini-dota/images # fofo-dota
+#train: /home/fofo/A/xsq/datasets/dota-v15/mini-dota/images # fofo-dota
+#val: /home/fofo/A/xsq/datasets/dota-v15/mini-dota/images # fofo-dota
 
 #train: /home/fofo/A/xsq/datasets/dota-v15/rotate_val/images # fofo-dota
 #val: /home/fofo/A/xsq/datasets/dota-v15/rotate_val/images # fofo-dota
